@@ -25,7 +25,7 @@ def initialize_loader(args: argparse.Namespace) -> Tuple[
 
     L = instaloader.Instaloader(
         download_video_thumbnails=False,
-        save_metadata=False,
+        save_metadata=True,
         download_geotags=False,
         compress_json=False,
         post_metadata_txt_pattern="",
@@ -65,8 +65,6 @@ def download_posts( profile: instaloader.Profile,
     max = args.max
     
     for post in profile.get_posts() :
-        date_utc = post.date_utc.strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"{date_utc}_UTC"
         loader.download_post(post, target = posts_target_dir)
         posts_downloaded += 1
         max -= 1
@@ -83,10 +81,12 @@ def download_stories( profile: instaloader.Profile,
                     ) -> None:
     stories_downloaded = 0
     stories_target_dir = ensure_outdir(str(Path(args.out) / args.username / "stories"))
+    metadata_target = ensure_outdir(str(Path(args.out) / args.username / "metadata"))
     # Download stories
     for story in loader.get_stories(userids=[profile.userid]):
         for item in story.get_items():
-            date_utc = item.date_utc.strftime("%Y-%m-%d_%H-%M-%S")
+            print(item.caption_mentions)
+            loader.save_metadata_json(filename=str(metadata_target), structure=item)
             loader.download_storyitem(item, target=stories_target_dir)
             stories_downloaded += 1
       
@@ -107,7 +107,7 @@ def main() -> None:
         print("[!] Failed to initialize loader or profile. Exiting.")
         return
 
-    download_posts(profile, L, args)
+    # download_posts(profile, L, args)
     download_stories(profile, L, args)
     L.close()
 
