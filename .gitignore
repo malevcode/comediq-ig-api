@@ -3,3 +3,8 @@ downloads
 .venv
 comediq
 output.txt
+examples
+.vscode
+*.csv
+*.json
+__pycache__

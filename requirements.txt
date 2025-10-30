@@ -4,3 +4,5 @@ easyocr
 opencv-python
 numpy<2
 imageio[ffmpeg]
+twilio>=8.0.0
+flask>=2.0.0
