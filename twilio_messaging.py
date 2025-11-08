@@ -33,10 +33,13 @@ class TwilioMessagingSystem:
         # Storage for tracking messages and responses
         self.sent_messages = {}
         self.received_responses = {}
+        self.mic_identifier_mapping = {}  # Maps phone number to mic identifier
         self.response_log_file = "twilio_responses.json"
+        self.mic_mapping_file = "twilio_mic_mapping.json"
         
         # Load existing responses if file exists
         self.load_responses()
+        self.load_mic_mapping()
     
     def load_responses(self):
         """Load previously received responses from file."""
@@ -44,7 +47,7 @@ class TwilioMessagingSystem:
             if os.path.exists(self.response_log_file):
                 with open(self.response_log_file, 'r') as f:
                     self.received_responses = json.load(f)
-                print(f"Loaded {len(self.received_responses)} existing responses")
+                # Removed verbose loading message
         except Exception as e:
             print(f"Error loading responses: {e}")
             self.received_responses = {}
@@ -56,6 +59,24 @@ class TwilioMessagingSystem:
                 json.dump(self.received_responses, f, indent=2)
         except Exception as e:
             print(f"Error saving responses: {e}")
+    
+    def load_mic_mapping(self):
+        """Load mic identifier mapping from file."""
+        try:
+            if os.path.exists(self.mic_mapping_file):
+                with open(self.mic_mapping_file, 'r') as f:
+                    self.mic_identifier_mapping = json.load(f)
+        except Exception as e:
+            print(f"Error loading mic mapping: {e}")
+            self.mic_identifier_mapping = {}
+    
+    def save_mic_mapping(self):
+        """Save mic identifier mapping to file."""
+        try:
+            with open(self.mic_mapping_file, 'w') as f:
+                json.dump(self.mic_identifier_mapping, f, indent=2)
+        except Exception as e:
+            print(f"Error saving mic mapping: {e}")
     
     def send_message_to_numbers(self, phone_numbers: List[str], message: str) -> Dict[str, str]:
         """
@@ -70,9 +91,7 @@ class TwilioMessagingSystem:
         """
         results = {}
         
-        print(f"Sending message to {len(phone_numbers)} numbers...")
-        print(f"Message: {message}")
-        print("-" * 50)
+        # Removed verbose header prints
         
         for phone_number in phone_numbers:
             try:
@@ -96,7 +115,7 @@ class TwilioMessagingSystem:
                 }
                 
                 results[phone_number] = message_obj.sid
-                print(f"✅ Sent to {phone_number}: {message_obj.sid}")
+                # Removed individual success message
                 
                 # Random delay between messages to avoid rate limiting
                 time.sleep(random.uniform(1, 3))
@@ -104,7 +123,7 @@ class TwilioMessagingSystem:
             except Exception as e:
                 error_msg = f"Error sending to {phone_number}: {str(e)}"
                 results[phone_number] = error_msg
-                print(f"❌ {error_msg}")
+                # Removed individual error message
         
         # Save sent messages
         self.save_sent_messages()
@@ -119,9 +138,56 @@ class TwilioMessagingSystem:
         except Exception as e:
             print(f"Error saving sent messages: {e}")
     
+    def send_messages_from_csv(self, csv_file: str, phone_column: str, message: str, 
+                              identifier_column: str = "unique_identifier") -> Dict[str, str]:
+        """
+        Send messages to phone numbers from a CSV file and store mic identifier mapping.
+        
+        Args:
+            csv_file: Path to the CSV file
+            phone_column: Column name containing the phone numbers
+            message: The message to send
+            identifier_column: Column name containing the mic identifiers
+            
+        Returns:
+            Dictionary mapping phone numbers to results
+        """
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_file)
+            
+            # Create mapping of phone numbers to ALL their mic identifiers (multiple mics per phone)
+            phone_to_mics = {}
+            for _, row in df.iterrows():
+                phone = str(row[phone_column]).strip()
+                mic_id = row[identifier_column]
+                
+                # Format phone number consistently
+                formatted_phone = phone if phone.startswith('+') else '+' + phone.lstrip('+')
+                
+                if formatted_phone not in phone_to_mics:
+                    phone_to_mics[formatted_phone] = []
+                phone_to_mics[formatted_phone].append(mic_id)
+            
+            # Get unique phone numbers to send to
+            phone_numbers = list(phone_to_mics.keys())
+            
+            # Store mic identifier mapping (phone -> list of mic IDs)
+            for phone, mic_ids in phone_to_mics.items():
+                self.mic_identifier_mapping[phone] = mic_ids
+            
+            # Save mapping
+            self.save_mic_mapping()
+            
+            return self.send_message_to_numbers(phone_numbers, message)
+        except Exception as e:
+            print(f"Error reading CSV file: {e}")
+            return {}
+    
     def parse_response(self, message_text: str) -> Optional[str]:
         """
         Parse structured Y/N/C responses from message text.
+        Handles both simple responses and numbered format (e.g., "1 Y", "2 N").
         
         Args:
             message_text: The text content of the received message
@@ -132,14 +198,50 @@ class TwilioMessagingSystem:
         text = message_text.strip().upper()
         
         # Look for Y/N/C patterns
-        if any(word in text for word in ['YES', 'Y', 'CONFIRM', 'ACTIVE']):
+        if any(word in text for word in ['YES', 'Y ', ' Y ', ' Y\n', '\nY', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.']):
             return 'Y'
-        elif any(word in text for word in ['NO', 'N', 'INACTIVE', 'NOT ACTIVE']):
+        elif any(word in text for word in ['NO', ' N ', ' N\n', '\nN', 'INACTIVE', 'NOT ACTIVE', 'N!', ' N.']):
             return 'N'
-        elif any(word in text for word in ['CHANGE', 'C', 'UPDATED', 'MODIFIED']):
+        elif any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', ' C\n', '\nC', 'UPDATED', 'MODIFIED']):
             return 'C'
         
         return None
+    
+    def parse_numbered_responses(self, message_text: str) -> Dict[int, str]:
+        """
+        Parse numbered responses from message text.
+        Handles format like "1 Y" or "2 N" or "3 Changes".
+        
+        Args:
+            message_text: The text content of the received message
+            
+        Returns:
+            Dictionary mapping mic numbers to status ('Y', 'N', 'C')
+        """
+        results = {}
+        lines = message_text.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Look for pattern: number followed by Y/N/C/Changes
+            import re
+            match = re.match(r'^(\d+)\s+(Y|N|C|YES|NO|CHANGES?|ACTIVE|INACTIVE)', line.upper())
+            if match:
+                mic_num = int(match.group(1))
+                status = match.group(2)
+                
+                # Normalize status
+                if status in ['Y', 'YES', 'ACTIVE']:
+                    results[mic_num] = 'Y'
+                elif status in ['N', 'NO', 'INACTIVE']:
+                    results[mic_num] = 'N'
+                elif status in ['C', 'CHANGES', 'CHANGE']:
+                    results[mic_num] = 'C'
+        
+        return results
     
     def process_incoming_message(self, from_number: str, message_text: str) -> str:
         """
@@ -167,11 +269,9 @@ class TwilioMessagingSystem:
         # Save responses
         self.save_responses()
         
-        # Log the response
+        # Log the response (only show parsed responses)
         if parsed_response:
-            print(f"📱 Response from {from_number}: {parsed_response} - '{message_text}'")
-        else:
-            print(f"📱 Unrecognized response from {from_number}: '{message_text}'")
+            print(f"📱 {from_number}: {parsed_response}")
         
         # Create TwiML response
         response = MessagingResponse()
@@ -231,8 +331,7 @@ class TwilioMessagingSystem:
         Returns:
             Dictionary mapping phone numbers to response data
         """
-        print("🔍 Collecting responses...")
-        print("-" * 50)
+        # Removed verbose header prints
         
         # Fetch incoming messages
         incoming_messages = self.fetch_incoming_messages(limit=100)
@@ -255,32 +354,42 @@ class TwilioMessagingSystem:
                         if existing_time and datetime.fromisoformat(existing_time) > message_date:
                             continue
                     
-                    # Parse the response
+                    # Parse the response (both simple and numbered)
                     parsed_response = self.parse_response(message_text)
+                    numbered_responses = self.parse_numbered_responses(message_text)
+                    
+                    # Get mic identifiers for this phone number (can be multiple)
+                    mic_identifiers = self.mic_identifier_mapping.get(from_number, [])
+                    if not isinstance(mic_identifiers, list):
+                        mic_identifiers = [mic_identifiers] if mic_identifiers else []
                     
                     # Store the response
                     self.received_responses[from_number] = {
                         'message': message_text,
                         'parsed_response': parsed_response,
+                        'numbered_responses': numbered_responses if numbered_responses else None,
                         'timestamp': message_date.isoformat(),
                         'raw_response': message_text,
-                        'message_sid': message.sid
+                        'message_sid': message.sid,
+                        'mic_identifiers': mic_identifiers  # List of mic IDs
                     }
                     
                     responses_found += 1
                     
-                    # Log the response
-                    status_emoji = "✅" if parsed_response else "🤔"
-                    print(f"{status_emoji} {from_number}: {message_text[:50]}")
+                    # Log the response (only for successful responses with mic IDs)
+                    mic_count = len(mic_identifiers) if mic_identifiers else 0
+                    if mic_count > 0:
+                        status_emoji = "✅" if parsed_response else "🤔"
+                        print(f"{status_emoji} {from_number} ({mic_count} mics): {message_text[:30]}...")
                     
             except Exception as e:
-                print(f"Error processing message: {e}")
+                # Removed individual error message
                 continue
         
         # Save responses
         if responses_found > 0:
             self.save_responses()
-            print(f"\n📥 Collected {responses_found} new response(s)")
+            print(f"📥 Collected {responses_found} new response(s)")
         
         return self.received_responses
     

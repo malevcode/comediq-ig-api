@@ -33,8 +33,10 @@ class InstagramMessagingSystem:
         # Storage for tracking messages and responses
         self.sent_messages = {}
         self.received_responses = {}
+        self.mic_identifier_mapping = {}  # Maps username to mic identifier
         self.response_log_file = "dm_replies.json"
         self.sent_messages_file = "ig_sent_messages.json"
+        self.mic_mapping_file = "ig_mic_mapping.json"
         
         # Login to Instagram
         self.login()
@@ -42,6 +44,7 @@ class InstagramMessagingSystem:
         # Load existing data
         self.load_responses()
         self.load_sent_messages()
+        self.load_mic_mapping()
     
     def login(self):
         """Login to Instagram with saved settings."""
@@ -58,7 +61,7 @@ class InstagramMessagingSystem:
             if os.path.exists(self.response_log_file):
                 with open(self.response_log_file, 'r') as f:
                     self.received_responses = json.load(f)
-                print(f"Loaded {len(self.received_responses)} existing responses")
+                # Removed verbose loading message
         except Exception as e:
             print(f"Error loading responses: {e}")
             self.received_responses = {}
@@ -82,12 +85,56 @@ class InstagramMessagingSystem:
             self.sent_messages = {}
     
     def save_sent_messages(self):
-        """Save sent messages to file."""
+        """Save sent messages to file, merging with existing data."""
         try:
+            # Load existing sent messages
+            existing_messages = {}
+            if os.path.exists(self.sent_messages_file):
+                try:
+                    with open(self.sent_messages_file, 'r') as f:
+                        existing_messages = json.load(f)
+                except Exception:
+                    pass  # If file is corrupted, start fresh
+            
+            # Merge with current messages (current takes precedence)
+            merged_messages = {**existing_messages, **self.sent_messages}
+            
+            # Save merged data
             with open(self.sent_messages_file, 'w') as f:
-                json.dump(self.sent_messages, f, indent=2)
+                json.dump(merged_messages, f, indent=2)
         except Exception as e:
             print(f"Error saving sent messages: {e}")
+    
+    def load_mic_mapping(self):
+        """Load mic identifier mapping from file."""
+        try:
+            if os.path.exists(self.mic_mapping_file):
+                with open(self.mic_mapping_file, 'r') as f:
+                    self.mic_identifier_mapping = json.load(f)
+        except Exception as e:
+            print(f"Error loading mic mapping: {e}")
+            self.mic_identifier_mapping = {}
+    
+    def save_mic_mapping(self):
+        """Save mic identifier mapping to file, merging with existing data."""
+        try:
+            # Load existing mic mapping
+            existing_mapping = {}
+            if os.path.exists(self.mic_mapping_file):
+                try:
+                    with open(self.mic_mapping_file, 'r') as f:
+                        existing_mapping = json.load(f)
+                except Exception:
+                    pass  # If file is corrupted, start fresh
+            
+            # Merge with current mapping (current takes precedence)
+            merged_mapping = {**existing_mapping, **self.mic_identifier_mapping}
+            
+            # Save merged data
+            with open(self.mic_mapping_file, 'w') as f:
+                json.dump(merged_mapping, f, indent=2)
+        except Exception as e:
+            print(f"Error saving mic mapping: {e}")
     
     def send_message_to_usernames(self, usernames: List[str], message: str) -> Dict[str, str]:
         """
@@ -102,9 +149,7 @@ class InstagramMessagingSystem:
         """
         results = {}
         
-        print(f"Sending message to {len(usernames)} usernames...")
-        print(f"Message: {message}")
-        print("-" * 50)
+        # Removed verbose header prints
         
         for username in usernames:
             try:
@@ -123,7 +168,7 @@ class InstagramMessagingSystem:
                 }
                 
                 results[clean_username] = user_id
-                print(f"✅ Sent to @{clean_username}: {user_id}")
+                # Removed individual success message
                 
                 # Random delay between messages to avoid rate limiting
                 time.sleep(random.uniform(5, 15))
@@ -131,34 +176,57 @@ class InstagramMessagingSystem:
             except UserNotFound:
                 error_msg = f"User @{username} not found"
                 results[username] = error_msg
-                print(f"❌ {error_msg}")
+                # Removed individual error message
             except TypeError:
                 pass  # Skip invalid usernames
             except Exception as e:
                 error_msg = f"Error sending to @{username}: {str(e)}"
                 results[username] = error_msg
-                print(f"❌ {error_msg}")
+                # Removed individual error message
         
         # Save sent messages
         self.save_sent_messages()
         
         return results
     
-    def send_messages_from_csv(self, csv_file: str, username_column: str, message: str) -> Dict[str, str]:
+    def send_messages_from_csv(self, csv_file: str, username_column: str, message: str, 
+                              identifier_column: str = "unique_identifier") -> Dict[str, str]:
         """
-        Send messages to usernames from a CSV file.
+        Send messages to usernames from a CSV file and store mic identifier mapping.
         
         Args:
             csv_file: Path to the CSV file
             username_column: Column name containing the usernames
             message: The message to send
+            identifier_column: Column name containing the mic identifiers
             
         Returns:
             Dictionary mapping usernames to results
         """
         try:
-            df = pd.read_csv(csv_file)[username_column].drop_duplicates()
-            usernames = df.tolist()
+            df = pd.read_csv(csv_file)
+            
+            # Create mapping of usernames to ALL their mic identifiers (multiple mics per user)
+            username_to_mics = {}
+            for _, row in df.iterrows():
+                username = str(row[username_column]).strip().lstrip('@')
+                mic_id = row[identifier_column]
+                
+                if username not in username_to_mics:
+                    username_to_mics[username] = []
+                username_to_mics[username].append(mic_id)
+            
+            # Get unique usernames to send to
+            usernames = list(username_to_mics.keys())
+            
+            # Store mic identifier mapping (username -> list of mic IDs)
+            self.mic_identifier_mapping = getattr(self, 'mic_identifier_mapping', {})
+            for username, mic_ids in username_to_mics.items():
+                self.mic_identifier_mapping[username] = mic_ids
+            
+            # Save mapping
+            self.save_mic_mapping()
+            
             return self.send_message_to_usernames(usernames, message)
         except Exception as e:
             print(f"Error reading CSV file: {e}")
@@ -167,6 +235,7 @@ class InstagramMessagingSystem:
     def parse_response(self, message_text: str) -> Optional[str]:
         """
         Parse structured Y/N/C responses from message text.
+        Handles both simple responses and numbered format (e.g., "1 Y", "2 N").
         
         Args:
             message_text: The text content of the received message
@@ -177,14 +246,50 @@ class InstagramMessagingSystem:
         text = message_text.strip().upper()
         
         # Look for Y/N/C patterns
-        if any(word in text for word in ['YES', 'Y ', ' Y ', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.']):
+        if any(word in text for word in ['YES', 'Y ', ' Y ', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.', ' Y\n', '\nY']):
             return 'Y'
-        elif any(word in text for word in ['NO', ' N ', ' N.', 'INACTIVE', 'NOT ACTIVE', 'N!']):
+        elif any(word in text for word in ['NO', ' N ', ' N.', 'INACTIVE', 'NOT ACTIVE', 'N!', ' N\n', '\nN']):
             return 'N'
-        elif any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', 'UPDATED', 'MODIFIED']):
+        elif any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', 'UPDATED', 'MODIFIED', ' C\n', '\nC']):
             return 'C'
         
         return None
+    
+    def parse_numbered_responses(self, message_text: str) -> Dict[int, str]:
+        """
+        Parse numbered responses from message text.
+        Handles format like "1 Y" or "2 N" or "3 Changes".
+        
+        Args:
+            message_text: The text content of the received message
+            
+        Returns:
+            Dictionary mapping mic numbers to status ('Y', 'N', 'C')
+        """
+        results = {}
+        lines = message_text.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Look for pattern: number followed by Y/N/C/Changes
+            import re
+            match = re.match(r'^(\d+)\s+(Y|N|C|YES|NO|CHANGES?|ACTIVE|INACTIVE)', line.upper())
+            if match:
+                mic_num = int(match.group(1))
+                status = match.group(2)
+                
+                # Normalize status
+                if status in ['Y', 'YES', 'ACTIVE']:
+                    results[mic_num] = 'Y'
+                elif status in ['N', 'NO', 'INACTIVE']:
+                    results[mic_num] = 'N'
+                elif status in ['C', 'CHANGES', 'CHANGE']:
+                    results[mic_num] = 'C'
+        
+        return results
     
     def collect_responses(self, amount: int = 100) -> Dict[str, List[str]]:
         """
@@ -197,8 +302,7 @@ class InstagramMessagingSystem:
         Returns:
             Dictionary mapping usernames to list of their messages
         """
-        print("🔍 Collecting responses...")
-        print("-" * 50)
+        # Removed verbose header prints
         
         # Fetch DM threads
         try:
@@ -226,7 +330,7 @@ class InstagramMessagingSystem:
                 )
                 
                 if not thread:
-                    print(f"❌ No thread found for @{clean_username}")
+                    # Removed individual error message
                     continue
                 
                 # Fetch messages in that thread
@@ -234,45 +338,61 @@ class InstagramMessagingSystem:
                     messages = self.cl.direct_messages(thread.id, amount=20)
                     time.sleep(random.uniform(0.5, 1))
                 except Exception as e:
-                    print(f"Error fetching messages for @{clean_username}: {e}")
+                    # Removed individual error message
                     continue
                 
                 # Filter messages that are replies from the user (not from us)
                 user_msgs = []
                 for m in messages:
                     if m.user_id == user_id and m.text:
-                        # Store with parsed response
+                        # Store with parsed response (both simple and numbered)
                         parsed_response = self.parse_response(m.text)
+                        numbered_responses = self.parse_numbered_responses(m.text)
+                        
                         msg_data = {
                             'message': m.text,
                             'parsed_response': parsed_response,
+                            'numbered_responses': numbered_responses if numbered_responses else None,
                             'timestamp': m.created_at.isoformat() if hasattr(m, 'created_at') else datetime.now().isoformat()
                         }
                         user_msgs.append(msg_data)
                 
                 if user_msgs:
-                    self.received_responses[clean_username] = user_msgs
+                    # Instagram API should return messages in chronological order
+                    # Trust the natural order rather than potentially incorrect timestamps
+                    
+                    # Get mic identifiers for this username (can be multiple)
+                    mic_identifiers = self.mic_identifier_mapping.get(clean_username, [])
+                    if not isinstance(mic_identifiers, list):
+                        mic_identifiers = [mic_identifiers] if mic_identifiers else []
+                    
+                    self.received_responses[clean_username] = {
+                        'messages': user_msgs,
+                        'mic_identifiers': mic_identifiers  # List of mic IDs
+                    }
                     responses_found += len(user_msgs)
                     
-                    # Log the response
-                    latest = user_msgs[-1]
+                    # Log the response - Instagram returns messages newest-to-oldest
+                    latest = user_msgs[0]  # Most recent is first in array
                     status_emoji = "✅" if latest.get('parsed_response') else "📱"
-                    print(f"{status_emoji} @{clean_username}: {latest['message'][:60]}")
-                
+                    mic_count = len(mic_identifiers) if mic_identifiers else 0
+                    mic_info = f" ({mic_count} mics)" if mic_count > 0 else ""
+                    print(f"{status_emoji} @{clean_username}{mic_info}: {latest['message'][:40]}...")
+                    
                 # Gentle extra delay between users
                 time.sleep(random.uniform(0.5, 1))
                 
             except UserNotFound:
-                print(f"User @{clean_username} not found")
+                # Removed individual error message
                 continue
             except Exception as e:
-                print(f"Error processing @{clean_username}: {e}")
+                # Removed individual error message
                 continue
         
         # Save responses
         if responses_found > 0:
             self.save_responses()
-            print(f"\n📥 Collected {responses_found} new response(s)")
+            print(f"📥 Collected {responses_found} new response(s)")
         
         return self.received_responses
     
@@ -280,7 +400,12 @@ class InstagramMessagingSystem:
         """Get a summary of received responses."""
         summary = {'Y': 0, 'N': 0, 'C': 0, 'unrecognized': 0}
         
-        for username, messages in self.received_responses.items():
+        for username, response_data in self.received_responses.items():
+            # Handle both old and new format
+            messages = response_data.get('messages', response_data) if isinstance(response_data, dict) else response_data
+            if not isinstance(messages, list):
+                messages = [messages]
+                
             for msg in messages:
                 response = msg.get('parsed_response')
                 if response in summary:

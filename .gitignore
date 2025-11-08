@@ -7,4 +7,5 @@ examples
 .vscode
 *.csv
 *.json
+*.log
 __pycache__
