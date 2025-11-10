@@ -12,11 +12,12 @@ import json
 import time
 import random
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 
 class InstagramMessagingSystem:
-    def __init__(self):
+    def __init__(self, sent_messages_file: str = "ig_sent_messages.json", 
+                 mic_mapping_file: str = "ig_mic_mapping.json"):
         """Initialize the Instagram messaging system."""
         load_dotenv()
         
@@ -35,8 +36,8 @@ class InstagramMessagingSystem:
         self.received_responses = {}
         self.mic_identifier_mapping = {}  # Maps username to mic identifier
         self.response_log_file = "dm_replies.json"
-        self.sent_messages_file = "ig_sent_messages.json"
-        self.mic_mapping_file = "ig_mic_mapping.json"
+        self.sent_messages_file = sent_messages_file
+        self.mic_mapping_file = mic_mapping_file
         
         # Login to Instagram
         self.login()
@@ -163,7 +164,7 @@ class InstagramMessagingSystem:
                 # Store the message info
                 self.sent_messages[clean_username] = {
                     'user_id': user_id,
-                    'sent_at': datetime.now().isoformat(),
+                    'sent_at': datetime.now(timezone.utc).isoformat(),
                     'message': message
                 }
                 
@@ -246,11 +247,12 @@ class InstagramMessagingSystem:
         text = message_text.strip().upper()
         
         # Look for Y/N/C patterns
-        if any(word in text for word in ['YES', 'Y ', ' Y ', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.', ' Y\n', '\nY']):
+        # Check for exact 'Y' first, then other patterns
+        if text == 'Y' or any(word in text for word in ['YES', 'Y ', ' Y ', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.', ' Y\n', '\nY']):
             return 'Y'
-        elif any(word in text for word in ['NO', ' N ', ' N.', 'INACTIVE', 'NOT ACTIVE', 'N!', ' N\n', '\nN']):
+        elif text == 'N' or any(word in text for word in ['NO', ' N ', ' N.', 'INACTIVE', 'NOT ACTIVE', 'N!', ' N\n', '\nN']):
             return 'N'
-        elif any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', 'UPDATED', 'MODIFIED', ' C\n', '\nC']):
+        elif text == 'C' or any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', 'UPDATED', 'MODIFIED', ' C\n', '\nC']):
             return 'C'
         
         return None
@@ -341,10 +343,46 @@ class InstagramMessagingSystem:
                     # Removed individual error message
                     continue
                 
-                # Filter messages that are replies from the user (not from us)
+                # Get when we sent our message to this user
+                sent_info = self.sent_messages.get(clean_username, {})
+                sent_at_str = sent_info.get('sent_at')
+                
+                sent_at_time = None
+                if sent_at_str:
+                    try:
+                        # Parse our sent_at timestamp (should be UTC)
+                        sent_at_time = datetime.fromisoformat(sent_at_str)
+                        if sent_at_time.tzinfo is None:
+                            sent_at_time = sent_at_time.replace(tzinfo=timezone.utc)
+                    except:
+                        pass
+                
+                # Filter messages that are replies from the user (not from us) AND after our sent message
                 user_msgs = []
                 for m in messages:
                     if m.user_id == user_id and m.text:
+                        # Check if message was sent after our outbound message
+                        # instagrapi uses 'timestamp' attribute, not 'created_at'
+                        message_time = getattr(m, 'timestamp', None)
+                        
+                        # Convert message timestamp to UTC for proper comparison
+                        if message_time:
+                            try:
+                                # If message_time has no timezone info, it's local time - convert to UTC
+                                if message_time.tzinfo is None:
+                                    # Treat as local time and convert to UTC
+                                    local_timezone = timezone(timedelta(seconds=-time.timezone))
+                                    message_time = message_time.replace(tzinfo=local_timezone).astimezone(timezone.utc)
+                                else:
+                                    # Convert to UTC if it has timezone info
+                                    message_time = message_time.astimezone(timezone.utc)
+                            except:
+                                # If conversion fails, skip timezone comparison
+                                message_time = None
+                        # Only collect messages sent AFTER our outbound message
+                        if sent_at_time and message_time and message_time <= sent_at_time:
+                            continue  # Skip messages from before our outbound message
+                        
                         # Store with parsed response (both simple and numbered)
                         parsed_response = self.parse_response(m.text)
                         numbered_responses = self.parse_numbered_responses(m.text)
@@ -353,7 +391,7 @@ class InstagramMessagingSystem:
                             'message': m.text,
                             'parsed_response': parsed_response,
                             'numbered_responses': numbered_responses if numbered_responses else None,
-                            'timestamp': m.created_at.isoformat() if hasattr(m, 'created_at') else datetime.now().isoformat()
+                            'timestamp': message_time.isoformat() if message_time else datetime.now(timezone.utc).isoformat()
                         }
                         user_msgs.append(msg_data)
                 

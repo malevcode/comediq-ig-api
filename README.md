@@ -1,32 +1,27 @@
 # Comediq Open Mic Verification System
 
-A streamlined system for sending verification messages to open mic hosts via Instagram DMs and SMS, collecting responses, and processing them into database-ready format with support for multiple mics per contact.
+Automated system for monthly open mic verification via Instagram DMs and SMS with multi-mic support and database integration.
 
 ## 🎯 Overview
 
-This system automates monthly open mic verification by:
-1. **Contact Preference Filtering**: Automatically routes contacts to SMS or Instagram based on preferences
-2. **Multi-Mic Support**: Groups multiple mics per host and handles numbered responses (e.g., "1 Y, 2 N, 3 Changes")
-3. **SMS Fallback**: Reaches SMS-preferred contacts via Instagram when Twilio is unavailable
-4. **Response Processing**: Converts Y/N/Changes responses to True/False/None for database updates
-5. **Merge-Safe Operations**: Multiple scripts can run without overwriting each other's data
+Automates monthly verification by:
+- **Smart Routing**: Instagram vs SMS based on contact preferences
+- **Multi-Mic Support**: Groups mics by host, handles numbered responses ("1 Y, 2 N, 3 Changes") 
+- **Timestamp Filtering**: Only collects new responses after sending messages
+- **Database Ready**: Processes responses for Supabase integration
+- **Configurable Files**: Custom file paths for different campaigns
 
-## 📁 Project Structure
+## 📁 Core Files
 
-```
-.
-├── ig_messaging.py                        # Core Instagram messaging system
-├── twilio_messaging.py                    # Core SMS messaging system  
-├── send_instagram_messages.py             # Send to Instagram-preferred contacts
-├── send_sms_messages.py                   # Send to SMS-preferred contacts
-├── send_dual_contact_instagram_messages.py # SMS fallback via Instagram
-├── collect_instagram_responses.py         # Collect Instagram DM replies
-├── collect_sms_responses.py              # Collect SMS replies
-├── process_responses.py                  # Process into database format
-├── requirements.txt                      # Python dependencies
-├── test.csv                             # Sample test data
-└── README.md                            # This file
-```
+**Messaging Systems:**
+- `ig_messaging.py` - Instagram DM system with timezone-aware filtering
+- `twilio_messaging.py` - SMS system with E.164 formatting
+
+**Scripts:**
+- `send_*.py` - Send messages (takes CSV file only)
+- `collect_*_responses.py` - Collect responses (supports custom file paths)
+- `process_responses.py` - Convert to database format
+- `update_supabase.py` - Push active/inactive mics to database
 
 ## 🚀 Quick Start
 
@@ -45,6 +40,12 @@ IG_PASSWORD=your_instagram_password
 TWILIO_ACCOUNT_SID=your_account_sid
 TWILIO_AUTH_TOKEN=your_auth_token
 TWILIO_PHONE_NUMBER=your_twilio_phone_number
+```
+
+**For Supabase (database updates):**
+```
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_KEY=your_supabase_anon_key
 ```
 
 **Optional (for changes form):**
@@ -81,52 +82,24 @@ Ensure your CSV file has the following columns:
 
 ## 📤 Sending Messages
 
-### Instagram Messages (Instagram-Preferred Contacts)
+All send scripts take only a CSV file - they create tracking files automatically.
 
 ```bash
-python send_instagram_messages.py [path/to/your/file.csv]
+# Instagram (Instagram-preferred contacts)
+python send_instagram_messages.py [csv_file]
+
+# SMS (SMS-preferred contacts) 
+python send_sms_messages.py [csv_file]
+
+# SMS Fallback via Instagram (when Twilio is down)
+python send_dual_contact_instagram_messages.py [csv_file]
 ```
 
-**Contact Filter**: Targets contacts where `sms_response` is missing/refused AND `changes_updates` has Instagram handle.
-
-**Features:**
-- Groups multiple mics by Instagram handle
-- Sends one message per host listing all their mics
-- Personalizes message with mic names, times, and venues
-- Rate limiting to avoid Instagram restrictions
-- **Merges** with existing mic mappings (doesn't overwrite)
-
-### SMS Messages (SMS-Preferred Contacts)
-
-```bash
-python send_sms_messages.py [path/to/your/file.csv]  
-```
-
-**Contact Filter**: Targets contacts where `sms_response` has valid phone number (not refused/N/A).
-
-**Features:**
-- Groups multiple mics by phone number  
-- E.164 phone formatting (+1 for US numbers)
-- Handles various phone formats: (555) 123-4567, 555-123-4567, etc.
-- Uses Twilio for reliable SMS delivery
-- Rate limiting and error handling
-- **Merges** with existing mic mappings (doesn't overwrite)
-
-### SMS Fallback via Instagram
-
-```bash
-python send_dual_contact_instagram_messages.py [path/to/your/file.csv]
-```
-
-**Use Case**: When Twilio SMS service is down or unavailable.
-
-**Contact Filter**: Targets contacts with BOTH valid `sms_response` AND `changes_updates` (dual contact capability).
-
-**Features:**
-- Reaches SMS-preferred contacts via Instagram fallback
-- Explains in message that SMS system is temporarily down  
-- Same multi-mic grouping and response handling
-- **Merges** with existing mappings from other scripts
+**Key Features:**
+- **Multi-mic grouping** by contact (Instagram handle or phone)
+- **E.164 phone formatting** for SMS (+15551234567)
+- **Rate limiting** to avoid platform restrictions
+- **Timezone-aware** message tracking for response filtering
 
 ## 💬 Message Format
 
@@ -193,52 +166,38 @@ See [RESPONSE_FORMAT.md](RESPONSE_FORMAT.md) for detailed parsing documentation.
 
 ## 📥 Collecting Responses
 
-After hosts respond to your messages:
-
-### Collect Instagram Responses
+Collect scripts support custom file paths for different campaigns:
 
 ```bash
+# Use default files
 python collect_instagram_responses.py
-```
-
-This fetches DM replies from Instagram and saves them to `dm_replies.json`.
-
-### Collect SMS Responses
-
-```bash
 python collect_sms_responses.py
+
+# Use custom files  
+python collect_instagram_responses.py custom_sent_messages.json custom_mic_mapping.json
+python collect_sms_responses.py custom_twilio_sent.json custom_twilio_mapping.json
 ```
 
-This fetches incoming SMS messages and saves them to `twilio_responses.json`.
+**Smart Filtering:**
+- **Timezone-aware**: Only collects responses after your sent messages (no old thread history)
+- **Exact matching**: "Y" responses now parse correctly (was mapping to null)
+- **UTC conversion**: Handles local time differences properly
 
-## 🔄 Processing Responses
-
-Once you've collected responses, process them into database-ready format:
+## 🔄 Processing & Database Updates
 
 ```bash
+# Process responses to database format
 python process_responses.py
+
+# Update Supabase with active/inactive mics
+python update_supabase.py [processed_responses_file]
 ```
 
-**Output:** `processed_responses.json`
-
-**Individual Mic Processing:**
-- Creates **one database entry per mic** (not per contact)
-- Handles multi-mic responses: "1 Y, 2 N, 3 Changes" → 3 separate entries
-- Uses **newest message** from Instagram API (messages[0])
-
-**Status Conversion:**
-- `Y`/`Yes`/`Active` → `true` (boolean)
-- `N`/`No`/`Inactive` → `false` (boolean)  
-- `C`/`Changes` → `null` (needs updates)
-
-**Database Schema:**
-```json
-{
-  "comediq_id": "mic_identifier_string",
-  "status": "true|false|null",
-  "response_timestamp": "ISO_timestamp"
-}
-```
+**Response Processing:**
+- **Per-mic entries**: One database row per mic (not per contact)
+- **Multi-mic parsing**: "1 Y, 2 N, 3 Changes" → 3 separate entries  
+- **Status conversion**: Y→true, N→false, Changes→null
+- **Supabase integration**: Extract active/inactive mic IDs for database updates
 
 ## 📊 Response Processing Features
 
@@ -259,24 +218,22 @@ python process_responses.py
 
 ## 🔄 Complete Workflow
 
-```
-1. Prepare CSV with open mic data
-   ↓
-2. Choose sending method:
-   ├─ send_instagram_messages.py (Instagram-preferred contacts)
-   ├─ send_sms_messages.py (SMS-preferred contacts)  
-   └─ send_dual_contact_instagram_messages.py (SMS fallback via IG)
-   ↓
-3. Wait for host responses
-   ↓
-4. Collect responses:
-   ├─ collect_instagram_responses.py (from Instagram DMs)
-   └─ collect_sms_responses.py (from Twilio SMS)
-   ↓
-5. Process to database format:
-   └─ process_responses.py → processed_responses.json
-   ↓
-6. Upload processed_responses.json to Supabase
+```bash
+# 1. Send messages (choose platform)
+python send_instagram_messages.py mics.csv
+python send_sms_messages.py mics.csv
+
+# 2. Wait for responses
+
+# 3. Collect responses (timestamp-filtered)
+python collect_instagram_responses.py
+python collect_sms_responses.py
+
+# 4. Process for database  
+python process_responses.py
+
+# 5. Update Supabase
+python update_supabase.py processed_responses.json
 ```
 
 ## 📋 Database Output Format
@@ -310,90 +267,38 @@ python process_responses.py
 - Each mic gets individual `comediq_id` and `status`
 ```
 
-## ⚠️ Important Notes
+## ⚠️ Key Features & Notes
 
-### Data Safety
-- **Merge Operations**: All scripts merge with existing data (no overwrites)
-- **Message Ordering**: Uses Instagram's newest-first API ordering (messages[0])
-- **Phone Formatting**: E.164 standard (+1 for US numbers)
-- **Individual Tracking**: One database entry per mic, not per contact
+**Recent Improvements:**
+- ✅ **Fixed "Y" parsing**: Single-character responses now parse correctly
+- ✅ **Timezone-aware filtering**: Only new responses collected (no old history)
+- ✅ **Configurable file paths**: Custom files for different campaigns  
+- ✅ **Supabase integration**: Direct database updates for active/inactive mics
+- ✅ **Security audit**: Removed exposed credentials and phone numbers
 
-### Rate Limiting & Reliability  
-- **Instagram**: Automatic delays to avoid rate limits, session persistence
-- **SMS**: Twilio rate limiting, E.164 phone validation
-- **Fallback**: SMS contacts reachable via Instagram when Twilio is down
-- **Error Handling**: Scripts continue on errors and report failures
-
-### Security & Privacy
-- **Never commit**: `.env`, `dump.json`, response files, or session data
-- **Instagram 2FA**: First login may require verification; saves session
-- **Phone Privacy**: E.164 normalization for consistent formatting
+**Data Safety:**
+- **Timestamp filtering**: Only collects responses after sent messages
+- **Merge operations**: Scripts don't overwrite existing data
+- **Individual tracking**: One database entry per mic (not per contact)
 
 ## 🛠️ Troubleshooting
 
-### Instagram Issues
+### Common Issues
 
-**"User not found"**
-- Verify Instagram handle exists and is public
-- Check for typos in CSV `changes_updates` column
+**Instagram:**
+- Rate limits: Wait 1+ hour between runs
+- Login: May require 2FA on first use
+- Handles: Verify in CSV `changes_updates` column
 
-**"Login failed"** 
-- Verify `INSTAGRAM_USERNAME`/`INSTAGRAM_PASSWORD` in `.env`
-- Instagram may require 2FA verification on first login
-- Check if account has restrictions
+**SMS:**  
+- Phone format: Auto-converts to E.164 (+15551234567)
+- Twilio auth: Check credentials in `.env`
+- Delivery fails: Use Instagram fallback script
 
-**"Rate limited"**
-- Instagram has strict rate limits on DMs
-- Scripts include automatic delays - don't reduce them
-- Wait 1+ hour before running again
-
-**"Message ordering wrong"**
-- Fixed: System now uses newest-first Instagram API ordering
-- Uses `messages[0]` for most recent response
-
-### SMS/Twilio Issues
-
-**"Invalid phone number"**
-- System auto-formats to E.164: `normalize_phone_to_e164()`
-- Handles: (555) 123-4567 → +15551234567
-- Check for international numbers (non-US)
-
-**"Twilio authentication failed"**
-- Verify `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` in `.env`
-- Check Twilio account is active and funded
-
-**"SMS delivery failed"**
-- Use SMS fallback: `send_dual_contact_instagram_messages.py`
-- Reaches SMS contacts via Instagram when Twilio is down
-
-### CSV & Data Issues
-
-**"CSV file not found"**
-- Provide absolute path: `/full/path/to/file.csv`
-- Check current directory with `pwd`
-- Verify file extension is `.csv`
-
-**"Missing columns"**
-- Required: `unique_identifier`, `changes_updates`, `sms_response`
-- Force string loading: `dtype=str` prevents phone number corruption
-- Check column names match exactly (case-sensitive)
-
-**"Phone numbers not loading correctly"**
-- CSV loads phone numbers as strings to preserve leading zeros
-- Format (555) 123-4567 handled by `normalize_phone_to_e164()`
-- Check for international numbers requiring country codes
-
-### Multi-Mic Processing Issues
-
-**"Response not parsing correctly"**
-- Numbered format: "1 Y", "2 N", "3 Changes" (one per line)
-- Simple format: "Y" applies to ALL mics for that contact
-- System creates individual database entries per mic
-
-**"Data overwriting problems"** 
-- Fixed: All save operations now merge existing data
-- Scripts can run in any order without data loss
-- Each script adds to existing `ig_sent_messages.json`
+**Responses:**
+- "Y" not parsing: ✅ Fixed in latest version
+- Old messages: ✅ Now filters by timestamp  
+- Multi-mic: Use "1 Y, 2 N, 3 Changes" format
 
 ## 🔐 Security
 
@@ -423,55 +328,27 @@ python process_responses.py
 
 ## 📞 Support
 
-For issues or questions, please check:
-1. This README
-2. Error messages in console output
-3. Generated JSON files for debugging
+Check console output and generated JSON files for debugging.
 
 ## 🎓 Advanced Usage
 
-### Custom Message Templates
-
-**Instagram Messages:**
-- Edit `create_message_for_host()` in `send_instagram_messages.py`
-- Customize multi-mic vs single-mic message formats
-- Update month name, signature, or instructions
-
-**SMS Messages:**
-- Modify message template in `send_sms_messages.py`
-- Adjust for SMS character limits and formatting
-
-### Response Parsing Customization
-
-**Instagram Parsing:**
-- Edit `parse_response_content()` in `process_responses.py`
-- Add new response patterns beyond Y/N/Changes
-- Handle special cases or alternative formats
-
-**Multi-Mic Logic:**
-- Modify numbered response parsing in `process_responses.py`
-- Customize how simple responses ("Y") apply to multiple mics
-
-### Script Customization
-
-**Contact Filtering:**
-- Adjust SQL-like filtering in each sender script
-- Modify dual-contact logic for SMS fallback
-- Change priority between SMS vs Instagram preferences
-
-### Batch Processing Multiple Files
-
+**Custom File Paths:**
 ```bash
-# Process multiple CSV files
+# Different campaigns
+python collect_instagram_responses.py campaign_nov_sent.json campaign_nov_mapping.json
+```
+
+**Batch Processing:**
+```bash
 for file in *.csv; do
   python send_instagram_messages.py "$file"
-done
-for file in *.csv; do
-  python send_instagram_messages.py "$file"
-  sleep 300  # Wait 5 minutes between batches
+  sleep 300  # Wait between batches
 done
 ```
 
-## 📜 License
+**Message Templates:**
+- Edit `create_message_for_host()` in send scripts
+- Customize `parse_response()` in messaging systems
 
-This project is for internal use by Comediq.
+---
+*Internal Comediq tool - See console output for detailed logging*

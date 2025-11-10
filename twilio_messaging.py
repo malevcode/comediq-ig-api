@@ -8,7 +8,7 @@ import json
 import time
 import random
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
@@ -17,7 +17,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 load_dotenv()
 
 class TwilioMessagingSystem:
-    def __init__(self):
+    def __init__(self, sent_messages_file="twilio_sent_messages.json", mic_mapping_file="twilio_mic_mapping.json"):
         """Initialize the Twilio messaging system."""
         # Twilio credentials from environment variables
         self.account_sid = os.getenv('TWILIO_ACCOUNT_SID')
@@ -30,16 +30,20 @@ class TwilioMessagingSystem:
         # Initialize Twilio client
         self.client = Client(self.account_sid, self.auth_token)
         
+        # File paths (configurable)
+        self.sent_messages_file = sent_messages_file
+        self.mic_mapping_file = mic_mapping_file
+        
         # Storage for tracking messages and responses
         self.sent_messages = {}
         self.received_responses = {}
         self.mic_identifier_mapping = {}  # Maps phone number to mic identifier
         self.response_log_file = "twilio_responses.json"
-        self.mic_mapping_file = "twilio_mic_mapping.json"
         
-        # Load existing responses if file exists
+        # Load existing data if files exist
         self.load_responses()
         self.load_mic_mapping()
+        self.load_sent_messages()
     
     def load_responses(self):
         """Load previously received responses from file."""
@@ -110,7 +114,7 @@ class TwilioMessagingSystem:
                 self.sent_messages[phone_number] = {
                     'sid': message_obj.sid,
                     'status': message_obj.status,
-                    'sent_at': datetime.now().isoformat(),
+                    'sent_at': datetime.now(timezone.utc).isoformat(),
                     'message': message
                 }
                 
@@ -133,10 +137,20 @@ class TwilioMessagingSystem:
     def save_sent_messages(self):
         """Save sent messages to file."""
         try:
-            with open("twilio_sent_messages.json", 'w') as f:
+            with open(self.sent_messages_file, 'w') as f:
                 json.dump(self.sent_messages, f, indent=2)
         except Exception as e:
             print(f"Error saving sent messages: {e}")
+    
+    def load_sent_messages(self):
+        """Load previously sent messages from file."""
+        try:
+            if os.path.exists(self.sent_messages_file):
+                with open(self.sent_messages_file, 'r') as f:
+                    self.sent_messages = json.load(f)
+        except Exception as e:
+            print(f"Error loading sent messages: {e}")
+            self.sent_messages = {}
     
     def send_messages_from_csv(self, csv_file: str, phone_column: str, message: str, 
                               identifier_column: str = "unique_identifier") -> Dict[str, str]:
@@ -198,11 +212,12 @@ class TwilioMessagingSystem:
         text = message_text.strip().upper()
         
         # Look for Y/N/C patterns
-        if any(word in text for word in ['YES', 'Y ', ' Y ', ' Y\n', '\nY', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.']):
+        # Check for exact 'Y' first, then other patterns
+        if text == 'Y' or any(word in text for word in ['YES', 'Y ', ' Y ', ' Y\n', '\nY', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.']):
             return 'Y'
-        elif any(word in text for word in ['NO', ' N ', ' N\n', '\nN', 'INACTIVE', 'NOT ACTIVE', 'N!', ' N.']):
+        elif text == 'N' or any(word in text for word in ['NO', ' N ', ' N\n', '\nN', 'INACTIVE', 'NOT ACTIVE', 'N!', ' N.']):
             return 'N'
-        elif any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', ' C\n', '\nC', 'UPDATED', 'MODIFIED']):
+        elif text == 'C' or any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', ' C\n', '\nC', 'UPDATED', 'MODIFIED']):
             return 'C'
         
         return None
@@ -348,6 +363,38 @@ class TwilioMessagingSystem:
                     message_text = message.body
                     message_date = message.date_created
                     
+                    # Get when we sent our message to this phone number
+                    sent_info = self.sent_messages.get(from_number, {})
+                    sent_at_str = sent_info.get('sent_at')
+                    sent_at_time = None
+                    if sent_at_str:
+                        try:
+                            # Convert our timezone-aware datetime for comparison
+                            sent_at_time = datetime.fromisoformat(sent_at_str)
+                            if sent_at_time.tzinfo is None:
+                                sent_at_time = sent_at_time.replace(tzinfo=timezone.utc)
+                        except:
+                            pass
+                    
+                    # Convert message timestamp to UTC for proper comparison
+                    if message_date:
+                        try:
+                            # If message_date has no timezone info, it's local time - convert to UTC
+                            if message_date.tzinfo is None:
+                                # Treat as local time and convert to UTC
+                                local_timezone = timezone(timedelta(seconds=-time.timezone))
+                                message_date = message_date.replace(tzinfo=local_timezone).astimezone(timezone.utc)
+                            else:
+                                # Convert to UTC if it has timezone info
+                                message_date = message_date.astimezone(timezone.utc)
+                        except:
+                            # If conversion fails, skip timezone comparison
+                            pass
+                    
+                    # Only collect messages sent AFTER our outbound message
+                    if sent_at_time and message_date and message_date <= sent_at_time:
+                        continue  # Skip messages from before our outbound message
+                    
                     # Skip if we already have a newer response from this number
                     if from_number in self.received_responses:
                         existing_time = self.received_responses[from_number].get('timestamp')
@@ -421,7 +468,7 @@ def create_webhook_handler():
     from flask import Flask, request
     
     app = Flask(__name__)
-    messaging_system = TwilioMessagingSystem()
+    messaging_system = TwilioMessagingSystem()  # Uses default file paths
     
     @app.route('/webhook/sms', methods=['POST'])
     def handle_sms():
@@ -444,7 +491,7 @@ def main():
     
     try:
         # Initialize the messaging system
-        messaging_system = TwilioMessagingSystem()
+        messaging_system = TwilioMessagingSystem()  # Uses default file paths
         
         # Check command line arguments
         if len(sys.argv) > 1 and sys.argv[1] == "collect":

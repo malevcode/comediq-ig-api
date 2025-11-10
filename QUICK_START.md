@@ -39,6 +39,10 @@ TWILIO_ACCOUNT_SID=your_account_sid
 TWILIO_AUTH_TOKEN=your_auth_token
 TWILIO_PHONE_NUMBER=+1234567890
 
+# Supabase Credentials (for database updates)
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_KEY=your_supabase_anon_key
+
 # Optional: Changes form link
 CHANGES_FORM_LINK=https://your-form-link.com
 ```

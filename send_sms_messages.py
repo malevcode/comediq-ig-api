@@ -4,6 +4,12 @@ Send SMS messages to open mic hosts grouped by their phone numbers.
 
 This script reads a CSV file and groups open mics by phone number, then sends
 a personalized message listing all mics for each host via Twilio.
+
+Usage:
+    python send_sms_messages.py [csv_file]
+    
+Arguments:
+    csv_file: Path to the CSV file containing mic data (default: active_to_confirm_NY.csv)
 """
 
 import pandas as pd
@@ -177,7 +183,7 @@ def main():
     load_dotenv()
     form_link = os.getenv("CHANGES_FORM_LINK")
     
-    # Get CSV file path
+    # Parse command line arguments
     if len(sys.argv) > 1:
         csv_file = sys.argv[1]
     else:
@@ -238,7 +244,7 @@ def main():
     # Initialize messaging system
     try:
         print("\n🔐 Initializing Twilio...")
-        messaging_system = TwilioMessagingSystem()
+        messaging_system = TwilioMessagingSystem()  # Uses default file paths
     except Exception as e:
         print(f"❌ Error initializing Twilio: {e}")
         sys.exit(1)
