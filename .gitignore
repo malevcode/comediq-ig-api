@@ -5,6 +5,9 @@ comediq
 output.txt
 examples
 .vscode
+batches/
+batches_instagram_all/
+batches_active_nyc_instagram/
 *.csv
 *.json
 *.log

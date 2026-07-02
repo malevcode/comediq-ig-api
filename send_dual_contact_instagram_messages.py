@@ -16,6 +16,30 @@ from datetime import datetime
 import re
 
 
+INSTAGRAM_HANDLE_PATTERN = re.compile(r"^@?[A-Za-z0-9._]{1,30}$")
+
+
+def clean_field_value(value) -> str:
+    """Return a display-safe string for optional CSV fields."""
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    if text.lower() in ["nan", "none", "null", "#n/a", "n/a"]:
+        return ""
+
+    return text
+
+
+def clean_instagram_handle(value) -> str:
+    """Return a normalized Instagram handle, or an empty string when invalid."""
+    handle = clean_field_value(value)
+    if not handle or not INSTAGRAM_HANDLE_PATTERN.match(handle):
+        return ""
+
+    return handle.lstrip("@")
+
+
 def normalize_phone_to_e164(phone: str) -> str:
     """
     Normalize a phone number to E.164 format.
@@ -73,32 +97,30 @@ def group_mics_by_instagram_handle_sms_fallback(df: pd.DataFrame) -> Dict[str, L
     # Apply SMS-preferred + Instagram fallback filter: 
     # - Originally SMS preferred (has valid phone number)
     # - But also has Instagram handle for fallback communication
+    valid_handles = df['changes_updates'].apply(clean_instagram_handle)
     sms_fallback = df[
         # Originally SMS preferred (has valid phone number)
         df['sms_response'].notna() &  # sms_response is NOT null
         (~df['sms_response'].isin(['refuse to', '#N/A', 'N/A'])) &  # NOT in refuse list
         (df['sms_response'].astype(str).str.strip() != '') &  # Not empty string
         (df['sms_response'].astype(str) != 'nan') &  # Not string 'nan'
-        # Has Instagram handle for fallback
-        df['changes_updates'].notna() &  # Must have Instagram handle
-        (df['changes_updates'] != '') &  # Not empty
-        (df['changes_updates'].astype(str) != 'nan') &  # Not string 'nan'
-        (df['changes_updates'].astype(str) != '#N/A')  # Not #N/A
-    ]
+        (valid_handles != '')  # Must have valid Instagram handle
+    ].copy()
+    sms_fallback['_clean_instagram_handle'] = valid_handles[sms_fallback.index]
+
+    invalid_handle_count = ((df['changes_updates'].apply(clean_field_value) != '') & (valid_handles == '')).sum()
     
     print(f"   📱→📸 {len(df)} total rows → {len(sms_fallback)} SMS-preferred with Instagram fallback")
+    if invalid_handle_count:
+        print(f"   ⚠️  Skipped {invalid_handle_count} row(s) with invalid Instagram handles/notes")
     
     for _, row in sms_fallback.iterrows():
-        handle = str(row['changes_updates']).strip()
+        handle = row['_clean_instagram_handle']
         phone = str(row['sms_response']).strip()
         
         # Skip invalid handles or phones
         if handle in ['nan', '#N/A', ''] or phone in ['nan', '#N/A', '', 'refuse to']:
             continue
-        
-        # Remove @ if present from handle
-        if handle.startswith('@'):
-            handle = handle[1:]
         
         # Validate phone number can be normalized
         normalized_phone = normalize_phone_to_e164(phone)

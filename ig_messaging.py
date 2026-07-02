@@ -30,6 +30,8 @@ class InstagramMessagingSystem:
         
         # Initialize instagrapi client
         self.cl = Client()
+        self.cl.challenge_code_handler = self.prompt_for_challenge_code
+        self.cl.change_password_handler = self.prompt_for_new_password
         
         # Storage for tracking messages and responses
         self.sent_messages = {}
@@ -49,12 +51,37 @@ class InstagramMessagingSystem:
     
     def login(self):
         """Login to Instagram with saved settings."""
-        if os.path.exists("dump.json"):
-            self.cl.load_settings("dump.json")
-            self.cl.login(self.username, self.password)
-        else:
+        try:
+            if os.path.exists("dump.json"):
+                self.cl.load_settings("dump.json")
+
             self.cl.login(self.username, self.password)
             self.cl.dump_settings('dump.json')
+        except Exception as e:
+            message = str(e)
+            if "legacy challenge flow" in message.lower():
+                raise RuntimeError(
+                    "Instagram is requiring a manual checkpoint. Open Instagram in a browser "
+                    "or the mobile app, log into this account from the same network if possible, "
+                    "complete the security check, then rerun this script. Keep dump.json so the "
+                    "retry uses the same saved device settings."
+                ) from e
+            raise
+
+    def prompt_for_challenge_code(self, username: str, choice=None):
+        """Prompt for Instagram email/SMS security code during login."""
+        destination = f" via {choice}" if choice else ""
+        while True:
+            code = input(f"Enter Instagram security code for {username}{destination}: ").strip()
+            if code:
+                return code
+
+    def prompt_for_new_password(self, username: str):
+        """Prompt for a new password if Instagram requires a password reset."""
+        while True:
+            password = input(f"Enter new Instagram password for {username}: ").strip()
+            if password:
+                return password
     
     def load_responses(self):
         """Load previously received responses from file."""
@@ -559,4 +586,3 @@ Can you confirm that your mic is active and lmk about any changes?"""
 
 if __name__ == "__main__":
     main()
-

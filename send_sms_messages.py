@@ -16,10 +16,27 @@ import pandas as pd
 from twilio_messaging import TwilioMessagingSystem
 import sys
 import os
+import json
 from dotenv import load_dotenv
 from typing import Dict, List
 from datetime import datetime
 import re
+
+
+DETAIL_COLUMNS = ["cost", "frequency", "location", "stage_time", "latest_end_time"]
+MIC_DETAILS_MAPPING_FILE = "twilio_mic_details_mapping.json"
+
+
+def clean_field_value(value) -> str:
+    """Return a display-safe string for optional CSV fields."""
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    if text.lower() in ["nan", "none", "null", "#n/a", "n/a"]:
+        return ""
+
+    return text
 
 
 def normalize_phone_to_e164(phone: str) -> str:
@@ -39,10 +56,11 @@ def normalize_phone_to_e164(phone: str) -> str:
     Returns:
         E.164 formatted phone number (+[country][number])
     """
-    if not phone or phone.strip() in ['nan', '#N/A', '', 'refuse to']:
+    phone_text = clean_field_value(phone)
+    if not phone_text or phone_text.lower() == 'refuse to':
         return ''
     
-    raw = str(phone).strip()
+    raw = phone_text
     
     # Extract all digits
     digits = re.sub(r'\D', '', raw)
@@ -61,9 +79,11 @@ def normalize_phone_to_e164(phone: str) -> str:
     elif len(digits) == 11 and digits.startswith('1'):
         # 11-digit with leading 1 (US format)
         return '+' + digits
-    else:
+    elif len(digits) >= 10:
         # Assume it's a US number and add +1
         return '+1' + digits
+
+    return ''
 
 
 def group_mics_by_phone_number(df: pd.DataFrame) -> Dict[str, List[Dict]]:
@@ -78,25 +98,21 @@ def group_mics_by_phone_number(df: pd.DataFrame) -> Dict[str, List[Dict]]:
     """
     grouped = {}
     
-    # Filter for SMS preference: sms_response NOT in ('refuse to', '#N/A', 'N/A') AND sms_response is NOT null
     print("🔍 Filtering for SMS preference...")
-    
-    # Apply SMS preference filter
-    sms_preferred = df[
-        df['sms_response'].notna() &  # sms_response is NOT null
-        (~df['sms_response'].isin(['refuse to', '#N/A', 'N/A'])) &  # NOT in refuse list
-        (df['sms_response'].astype(str).str.strip() != '') &  # Not empty string
-        (df['sms_response'].astype(str) != 'nan')  # Not string 'nan'
-    ]
-    
-    print(f"   📱 {len(df)} total rows → {len(sms_preferred)} SMS preferred")
+
+    normalized_phones = df['sms_response'].apply(normalize_phone_to_e164)
+    sms_preferred = df[normalized_phones != ''].copy()
+    sms_preferred['_e164_phone'] = normalized_phones[sms_preferred.index]
+
+    nonempty_sms = df['sms_response'].apply(clean_field_value) != ''
+    invalid_phone_count = (nonempty_sms & (normalized_phones == '')).sum()
+
+    print(f"   📱 {len(df)} total rows → {len(sms_preferred)} valid SMS rows")
+    if invalid_phone_count:
+        print(f"   ⚠️  Skipped {invalid_phone_count} row(s) with invalid SMS phone values")
     
     for _, row in sms_preferred.iterrows():
-        phone = str(row['sms_response']).strip()
-        
-        # Skip invalid phone numbers (shouldn't happen after filtering but safety check)
-        if phone in ['nan', '#N/A', '', 'refuse to']:
-            continue
+        phone = row['_e164_phone']
         
         # Create mic info dict
         mic_info = {
@@ -105,8 +121,12 @@ def group_mics_by_phone_number(df: pd.DataFrame) -> Dict[str, List[Dict]]:
             'day': row.get('day', ''),
             'time': row.get('start_time', ''),
             'venue': row.get('venue_name', ''),
-            'location': row.get('location', ''),
+            'location': clean_field_value(row.get('location', '')),
             'borough': row.get('borough', ''),
+            'cost': clean_field_value(row.get('cost', '')),
+            'frequency': clean_field_value(row.get('frequency', '')),
+            'stage_time': clean_field_value(row.get('stage_time', '')),
+            'latest_end_time': clean_field_value(row.get('latest_end_time', '')),
         }
         
         if phone not in grouped:
@@ -114,6 +134,38 @@ def group_mics_by_phone_number(df: pd.DataFrame) -> Dict[str, List[Dict]]:
         grouped[phone].append(mic_info)
     
     return grouped
+
+
+def save_mic_details_mapping(grouped_mics: Dict[str, List[Dict]], file_path: str = MIC_DETAILS_MAPPING_FILE) -> None:
+    """Save CSV-provided per-mic details for response/database processing."""
+    mic_details = {}
+
+    for mics in grouped_mics.values():
+        for mic in mics:
+            mic_id = clean_field_value(mic.get('unique_id', ''))
+            if not mic_id:
+                continue
+
+            mic_details[mic_id] = {
+                'location': clean_field_value(mic.get('location', '')),
+                'cost': clean_field_value(mic.get('cost', '')),
+                'frequency': clean_field_value(mic.get('frequency', '')),
+                'stage_time': clean_field_value(mic.get('stage_time', '')),
+                'latest_end_time': clean_field_value(mic.get('latest_end_time', '')),
+            }
+
+    try:
+        existing_details = {}
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                existing_details = json.load(f)
+
+        with open(file_path, 'w') as f:
+            json.dump({**existing_details, **mic_details}, f, indent=2)
+
+        print(f"💾 Saved mic details mapping to: {file_path}")
+    except Exception as e:
+        print(f"⚠️  Error saving mic details mapping: {e}")
 
 
 def create_message_for_host_phone(phone: str, mics: List[Dict], form_link: str = None) -> str:
@@ -139,6 +191,15 @@ def create_message_for_host_phone(phone: str, mics: List[Dict], form_link: str =
             mic_line = f"{i}. {mic_name} ({mic['day']} at {mic['time']})"
         else:
             mic_line = f"{i}. {mic_name}"
+
+        details = []
+        details.append(f"cost: {mic.get('cost') or '[please confirm]'}")
+        details.append(f"frequency: {mic.get('frequency') or '[please confirm]'}")
+        details.append(f"location: {mic.get('location') or '[please confirm]'}")
+        details.append(f"stage time: {mic.get('stage_time') or '[please confirm]'}")
+        details.append(f"latest end time: {mic.get('latest_end_time') or '[please confirm]'}")
+
+        mic_line += "\n   " + " | ".join(details)
         
         mic_list.append(mic_line)
     
@@ -150,11 +211,17 @@ def create_message_for_host_phone(phone: str, mics: List[Dict], form_link: str =
 
 Reply format: [number] Y/N/Changes
 
+Please include the correct cost, frequency, location, stage time, and latest end time for each mic.
+Example: 1 Y, cost: $5, frequency: weekly, location: 123 Main St, stage time: 5 min, latest end time: 10pm
+
 Here's what we have listed:"""
     else:
         base_message = f"""Hey! It's Adam from Comediq! I'm doing the monthly check in to update our {current_month} mic list. Please reply:
 
 Reply: Y (active), N (not active), or Changes (has updates)
+
+Please include the correct cost, frequency, location, stage time, and latest end time.
+Example: Y, cost: $5, frequency: weekly, location: 123 Main St, stage time: 5 min, latest end time: 10pm
 
 Here's what we have listed:"""
 
@@ -211,6 +278,11 @@ def main():
         print(f"❌ Error: Missing required columns: {missing_columns}")
         print(f"   Available columns: {list(df.columns)}")
         sys.exit(1)
+
+    missing_detail_columns = [col for col in DETAIL_COLUMNS if col not in df.columns]
+    if missing_detail_columns:
+        print(f"⚠️  Optional detail columns missing: {missing_detail_columns}")
+        print("   Messages will still send and placeholders will be shown for those details.")
     
     # Group mics by phone number (with SMS preference filtering)
     print("\n📋 Grouping mics by phone number...")
@@ -275,10 +347,11 @@ def main():
     
     # Save the mapping
     messaging_system.save_mic_mapping()
+    save_mic_details_mapping(grouped_mics)
     
     for phone, mics in sorted(grouped_mics.items()):
         message = create_message_for_host_phone(phone, mics, form_link)
-        e164_phone = phone_to_e164[phone]  # Use E.164 formatted number for sending
+        e164_phone = phone_to_e164.get(phone, phone)  # Use E.164 formatted number for sending
         
         try:
             result = messaging_system.send_message_to_numbers([e164_phone], message)
@@ -318,4 +391,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
