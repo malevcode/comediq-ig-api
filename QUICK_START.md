@@ -1,103 +1,137 @@
 # Quick Start Guide
 
-Get up and running with the Comediq Open Mic Verification System in 5 minutes.
+Get the Comediq monthly open mic verification flow running quickly.
 
-## Prerequisites
+For the full Instagram response workflow, see [INSTAGRAM_RESPONSE_WORKFLOW.md](INSTAGRAM_RESPONSE_WORKFLOW.md).
 
-- Python 3.8 or higher
-- Instagram account credentials
-- Twilio account (for SMS functionality)
-
-## Setup (One-time)
-
-### 1. Create Virtual Environment
+## Setup
 
 ```bash
 python3 -m venv venv
-source venv/bin/activate  # macOS/Linux
-# OR
-venv\Scripts\activate     # Windows
-```
-
-### 2. Install Dependencies
-
-```bash
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure Environment
-
-Create a `.env` file in the project root:
+Create `.env`:
 
 ```env
-# Instagram Credentials
 IG_USER=your_instagram_username
 IG_PASSWORD=your_instagram_password
+CHANGES_FORM_LINK=https://your-form-link.com
 
-# Twilio Credentials (for SMS only)
+# Optional SMS/Twilio
 TWILIO_ACCOUNT_SID=your_account_sid
 TWILIO_AUTH_TOKEN=your_auth_token
 TWILIO_PHONE_NUMBER=+1234567890
-
-# Supabase Credentials (for database updates)
-SUPABASE_URL=your_supabase_project_url
-SUPABASE_KEY=your_supabase_anon_key
-
-# Optional: Changes form link
-CHANGES_FORM_LINK=https://your-form-link.com
 ```
 
-## Basic Workflow
+## Send Instagram DMs
 
-### Option A: Instagram Messages
+Your CSV should include at least:
+
+- `unique_identifier`
+- `open_mic`
+- `changes_updates`
+- `day`
+- `start_time`
+
+Send grouped DMs:
 
 ```bash
-# 1. Send messages
-python send_instagram_messages.py active_to_confirm_NY.csv
+source venv/bin/activate
+python send_instagram_messages.py /path/to/current_mics.csv
+```
 
-# 2. Collect responses (later)
-python collect_instagram_responses.py
+This writes:
 
-# 3. Process responses
+- `ig_sent_messages.json`
+- `ig_mic_mapping.json`
+
+## Collect Responses
+
+Collect replies for the current sent-message round:
+
+```bash
+python collect_instagram_responses.py --amount 300
+```
+
+Only collect handles that do not already have a response entry:
+
+```bash
+python collect_instagram_responses.py --missing-only --amount 300
+```
+
+Preview missing handles without logging into Instagram:
+
+```bash
+python collect_instagram_responses.py --missing-only --dry-run
+```
+
+Collect one handle:
+
+```bash
+python collect_instagram_responses.py --username paulzachcomedy --amount 300
+```
+
+Collection writes `dm_replies.json` and automatically runs `process_responses.py`.
+
+## Process And Review
+
+You can rerun processing anytime:
+
+```bash
 python process_responses.py
 ```
 
-### Option B: SMS Messages
+Main outputs:
+
+- `processed_responses.json`: structured summary
+- `ai_parse_queue.json`: unclear/change replies needing AI or review
+- `ai_parse_results_template.json`: fill-in format for AI results
+- `ai_parse_results.json`: parsed AI results
+- `supabase_response_updates.sql`: SQL to review and run in Supabase
+
+If `ai_parse_queue.json` has items, parse/edit `ai_parse_results.json`, then rerun:
 
 ```bash
-# 1. Send messages
-python send_sms_messages.py active_to_confirm_NY.csv
-
-# 2. Collect responses (later)
-python collect_sms_responses.py
-
-# 3. Process responses
 python process_responses.py
 ```
 
-## What Each Script Does
+## Supabase Update
 
-| Script | Purpose | When to Use |
-|--------|---------|-------------|
-| `send_instagram_messages.py` | Send DMs to Instagram handles | Initial outreach |
-| `send_sms_messages.py` | Send SMS to phone numbers | Initial outreach |
-| `collect_instagram_responses.py` | Fetch DM replies | After waiting for responses |
-| `collect_sms_responses.py` | Fetch SMS replies | After waiting for responses |
-| `process_responses.py` | Organize responses | After collection |
+Review generated SQL:
 
-## Output Files
+```bash
+less supabase_response_updates.sql
+grep -n "AI note" supabase_response_updates.sql
+grep -n "responded_unclear" supabase_response_updates.sql
+```
 
-- `ig_sent_messages.json` - Log of sent Instagram DMs
-- `twilio_sent_messages.json` - Log of sent SMS messages
-- `dm_replies.json` - Collected Instagram responses
-- `twilio_responses.json` - Collected SMS responses
-- `processed_responses.json` - **Final organized output** ⭐
+Then run `supabase_response_updates.sql` in the Supabase SQL editor.
 
-## Next Steps
+The SQL updates existing rows only. Add brand-new mics separately.
 
-After running `process_responses.py`, you'll have `processed_responses.json` with all your verification data ready to update your Supabase table.
+## Status Values
 
-## Need Help?
+- `responded_confirmed`: host confirmed; no update needed
+- `responded_changes`: update needed
+- `responded_unclear`: response received but not safely interpretable
+- `no_response`: valid Instagram handle but no response collected
+- `not_sent`: no valid Instagram handle
 
-See the full [README.md](README.md) for detailed documentation and troubleshooting.
+`last_verified` uses `MM/DD/YY` and is only stamped for `responded_confirmed` and `responded_changes`.
 
+## Full Monthly List
+
+To classify all mics, including `no_response` and `not_sent`:
+
+```bash
+python prepare_monthly_verification_updates.py /path/to/current_export.csv
+python update_monthly_verification_supabase.py august_supabase_updates.csv
+```
+
+Apply after review:
+
+```bash
+python update_monthly_verification_supabase.py august_supabase_updates.csv --apply
+```

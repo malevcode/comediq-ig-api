@@ -2,207 +2,164 @@
 
 ## Overview
 
-This project has been completely refactored into a clean, maintainable messaging system for verifying open mic listings through Instagram DMs and SMS.
+This project verifies open mic listings through Instagram DMs and SMS, maps formatted replies directly to mic records, queues ambiguous replies for AI/human parsing, and generates reviewable Supabase SQL.
 
-## What Was Done
+The current Instagram workflow is documented in [INSTAGRAM_RESPONSE_WORKFLOW.md](INSTAGRAM_RESPONSE_WORKFLOW.md).
 
-### 🧹 Cleanup
-- ✅ Removed `send_message.py`, `collect_messages.py`, `example_twilio_usage.py`, `test.sh`
-- ✅ Removed duplicate documentation (`TWILIO_README.md`)
-- ✅ Cleaned up unnecessary test/example files
-- ✅ Organized project structure
+## Core Workflow
 
-### 🆕 New Scripts Created
-
-1. **send_instagram_messages.py** ⭐
-   - Groups mics by Instagram handle
-   - Sends one personalized message per host listing all their mics
-   - Interactive CSV file selection
-   - Progress reporting and error handling
-
-2. **send_sms_messages.py** ⭐
-   - Groups mics by phone number
-   - Uses Twilio for SMS delivery
-   - Same personalized format as Instagram messages
-   - Rate limiting built-in
-
-3. **collect_instagram_responses.py**
-   - Fetches DM replies from Instagram
-   - Saves to `dm_replies.json`
-
-4. **collect_sms_responses.py**
-   - Fetches SMS replies via Twilio
-   - Saves to `twilio_responses.json`
-
-5. **process_responses.py** ⭐
-   - Combines all collected responses
-   - Generates summary statistics
-   - Creates `processed_responses.json` for database updates
-   - Response parsing and categorization
-
-### 📚 Documentation
-
-- **README.md**: Comprehensive documentation with usage examples, troubleshooting, and workflow guides
-- **QUICK_START.md**: Fast onboarding guide for new users
-- **CHANGELOG.md**: Version history and changes
-- **PROJECT_SUMMARY.md**: This file
-
-### 🔧 Core Files (Preserved)
-
-- **ig_messaging.py**: Instagram messaging infrastructure (unchanged)
-- **twilio_messaging.py**: SMS messaging infrastructure (unchanged)
-- **requirements.txt**: Updated with `instagrapi` and `pandas`
-
-## Key Features
-
-### ✨ Smart Grouping
-- Automatically groups multiple mics by host
-- Sends one comprehensive message instead of multiple
-- Reduces spam and improves response rates
-
-### 📊 Message Format
-Each host receives a message like:
-
-```
-Hey @username! I'm doing a monthly verification of every open mic 
-on my platform.
-
-Can you confirm which of your mics are still active and let me know 
-about any changes?
-
-Here's what we currently have listed for you:
-
-1. Bushwick Comedy Club (Tuesday at 7:00 PM) - Bushwick Comedy Club
-2. Another Mic (Wednesday at 8:00 PM) - Another Venue
-
-Please respond with any updates. Thanks!
+```text
+CSV export
+  -> send Instagram DMs grouped by host
+  -> collect responses after sent timestamp
+  -> map clear Y/N replies directly
+  -> queue changes/unclear replies for AI parsing
+  -> generate Supabase SQL
+  -> review and run SQL
 ```
 
-### 🔄 Complete Workflow
+## Main Scripts
 
+### `send_instagram_messages.py`
+
+- Reads a CSV of mics.
+- Validates Instagram handles in `changes_updates`.
+- Groups multiple mics by host.
+- Sends one DM per Instagram handle.
+- Writes `ig_sent_messages.json` and `ig_mic_mapping.json`.
+
+### `collect_instagram_responses.py`
+
+- Logs into Instagram through `instagrapi`.
+- Fetches recent DM threads.
+- Keeps only replies after the original sent timestamp.
+- Saves replies to `dm_replies.json`.
+- Automatically runs `process_responses.py`.
+- Supports targeted and missing-only collection:
+
+```bash
+python collect_instagram_responses.py --amount 300
+python collect_instagram_responses.py --missing-only --dry-run
+python collect_instagram_responses.py --missing-only --amount 300
+python collect_instagram_responses.py --username paulzachcomedy --amount 300
 ```
-CSV File → Send Messages → Wait → Collect Responses → Process → JSON Output
+
+### `process_responses.py`
+
+- Re-parses raw reply text instead of trusting stale saved parser output.
+- Maps clear `Y`, `N`, and numbered `1 Y` / `2 N` responses directly.
+- Sends update-like or unclear replies to `ai_parse_queue.json`.
+- Adds full `message_history` to AI queue items for context.
+- Loads `ai_parse_results.json` when present.
+- Generates `supabase_response_updates.sql`.
+
+### `prepare_monthly_verification_updates.py`
+
+- Builds full-list monthly outputs from a current export.
+- Classifies `responded_confirmed`, `responded_changes`, `responded_unclear`, `no_response`, and `not_sent`.
+- Useful when you need status values for every mic, not only respondents.
+
+### `update_monthly_verification_supabase.py`
+
+- Applies the narrow monthly CSV to Supabase.
+- Dry-run by default.
+- Stamps `last_verified` only when a row is `responded_confirmed` or `responded_changes`.
+
+## Generated Files
+
+### Sent/Mapping State
+
+- `ig_sent_messages.json`: Instagram handles messaged and sent timestamps
+- `ig_mic_mapping.json`: Instagram handle to mic identifiers
+- `dump.json`: Instagram session state
+
+### Response Processing
+
+- `dm_replies.json`: collected Instagram replies
+- `processed_responses.json`: structured summary of direct and queued responses
+- `ai_parse_queue.json`: ambiguous/change replies for AI or human parsing
+- `ai_parse_results_template.json`: template for AI parse output
+- `ai_parse_results.json`: AI/human parsed queue results
+- `supabase_response_updates.sql`: reviewable SQL updates
+
+### Archives
+
+- `response_runs/`: snapshots of response artifacts after important milestones
+
+## Status Values
+
+`aug_verification_status` and monthly equivalents use:
+
+- `responded_confirmed`: host confirmed and no update is needed
+- `responded_changes`: host responded and an update is needed
+- `responded_unclear`: host responded but the update/status cannot be safely determined
+- `no_response`: valid Instagram handle but no response collected
+- `not_sent`: no valid Instagram handle
+
+`last_verified` uses `MM/DD/YY`.
+
+`last_verified` is only updated for:
+
+- `responded_confirmed`
+- `responded_changes`
+
+It is not updated for:
+
+- `responded_unclear`
+- `no_response`
+- `not_sent`
+
+## AI Parse Result Shape
+
+Each AI result keeps `queue_id` and `mic_identifier` unchanged:
+
+```json
+{
+  "queue_id": "instagram_ig_example_micid_hash",
+  "mic_identifier": "mic-id",
+  "verification_status": "responded_changes",
+  "active": true,
+  "updates": {
+    "start_time": "7:15 PM"
+  },
+  "confidence": 0.98,
+  "needs_human_review": false,
+  "notes": "Host says it now starts at 7:15."
+}
 ```
+
+The SQL generator updates existing rows only. Brand-new mics and true deletions still need separate manual handling or insert SQL.
 
 ## File Structure
 
-```
+```text
 .
-├── Core Scripts
-│   ├── send_instagram_messages.py      # Send grouped Instagram DMs
-│   ├── send_sms_messages.py            # Send grouped SMS messages
-│   ├── collect_instagram_responses.py  # Fetch Instagram replies
-│   ├── collect_sms_responses.py        # Fetch SMS replies
-│   └── process_responses.py            # Organize responses
-│
-├── Infrastructure
-│   ├── ig_messaging.py                 # Instagram API wrapper
-│   └── twilio_messaging.py             # Twilio API wrapper
-│
-├── Documentation
-│   ├── README.md                       # Full documentation
-│   ├── QUICK_START.md                  # Quick onboarding
-│   ├── CHANGELOG.md                    # Version history
-│   └── PROJECT_SUMMARY.md              # This file
-│
-├── Configuration
-│   ├── requirements.txt                # Python dependencies
-│   ├── .env                            # Credentials (not in repo)
-│   └── .gitignore                      # Git exclusions
-│
-└── Data Files
-    ├── active_to_confirm_NY.csv        # Your input data
-    ├── processed_responses.json        # Final output ⭐
-    └── *.json                          # Intermediate files
+├── send_instagram_messages.py
+├── collect_instagram_responses.py
+├── process_responses.py
+├── prepare_monthly_verification_updates.py
+├── update_monthly_verification_supabase.py
+├── ig_messaging.py
+├── twilio_messaging.py
+├── INSTAGRAM_RESPONSE_WORKFLOW.md
+├── QUICK_START.md
+├── README.md
+└── PROJECT_SUMMARY.md
 ```
 
-## Usage Examples
+## Current Best Practice
 
-### Send Instagram Messages
-```bash
-python send_instagram_messages.py active_to_confirm_NY.csv
-```
-
-### Send SMS Messages
-```bash
-python send_sms_messages.py active_to_confirm_NY.csv
-```
-
-### Collect Responses
-```bash
-python collect_instagram_responses.py
-python collect_sms_responses.py
-```
-
-### Process Responses
-```bash
-python process_responses.py
-```
-
-Output: `processed_responses.json` ready for database import
-
-## Output Format
-
-The `processed_responses.json` file includes:
-
-- **Metadata**: Processing timestamp and summary statistics
-- **Responses**: Complete list organized by:
-  - Contact method (Instagram/SMS)
-  - Response type (Y/N/C)
-  - Timestamps
-  - Raw messages
-  - Status (recognized/unrecognized)
-
-## Environment Setup
-
-Required `.env` variables:
-
-```env
-# Instagram
-IG_USER=your_username
-IG_PASSWORD=your_password
-
-# Twilio
-TWILIO_ACCOUNT_SID=your_sid
-TWILIO_AUTH_TOKEN=your_token
-TWILIO_PHONE_NUMBER=+1234567890
-```
-
-## Dependencies
-
-- `python-dotenv` - Environment variables
-- `instagrapi` - Instagram API
-- `twilio` - SMS API
-- `pandas` - CSV processing
-- `easyocr`, `opencv-python`, `numpy` - Legacy dependencies
-- `flask` - Webhook support (optional)
-
-## Improvements Over Previous Version
-
-| Old System | New System |
-|-----------|-----------|
-| One message per mic | One message per host (grouped) |
-| Manual file selection | Interactive prompts |
-| Basic error handling | Comprehensive error handling |
-| Limited documentation | Complete docs with examples |
-| Mixed concerns | Clear separation of concerns |
-| Hard to extend | Modular and maintainable |
-
-## Next Steps
-
-1. Test with your data
-2. Review `processed_responses.json` output
-3. Integrate with your Supabase table
-4. Schedule regular verification runs
+1. Send DMs with `send_instagram_messages.py`.
+2. Collect broadly with `collect_instagram_responses.py --amount 300`.
+3. Use `--missing-only` for later same-round collection.
+4. Parse `ai_parse_queue.json` into `ai_parse_results.json`.
+5. Rerun `process_responses.py`.
+6. Review `supabase_response_updates.sql`.
+7. Run SQL in Supabase.
+8. Archive response artifacts in `response_runs/`.
 
 ## Support
 
-- See README.md for detailed documentation
-- Check QUICK_START.md for quick answers
-- Review CHANGELOG.md for recent changes
-- Test scripts have built-in error reporting
-
----
-
-**Status**: ✅ Complete and production-ready
-
+- Start with [QUICK_START.md](QUICK_START.md).
+- Use [INSTAGRAM_RESPONSE_WORKFLOW.md](INSTAGRAM_RESPONSE_WORKFLOW.md) for the full current Instagram process.
+- Check console output and generated JSON/SQL files for debugging.

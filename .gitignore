@@ -1,6 +1,7 @@
 downloads
 .env
 .venv
+venv/
 comediq
 output.txt
 examples
@@ -10,3 +11,42 @@ examples
 *.log
 __pycache__
 .DS_Store
+
+# Instagram/session state
+dump.json
+
+# Generated response-processing artifacts
+processed_responses.json
+dm_replies.json
+ai_parse_queue.json
+ai_parse_results.json
+ai_parse_results_template.json
+supabase_response_updates.sql
+response_runs/
+
+# Generated monthly verification outputs
+august_*updates*.csv
+august_*preview*.csv
+july_*updates*.csv
+july_*report.txt
+*_supabase_updates.csv
+*_google_sheet_updates.csv
+*_dm_sent_audit_report.txt
+
+# Local batch/run folders
+batches_active_nyc_instagram/
+batches_august_instagram/
+
+# One-off reconciliation reports and generated SQL
+add_aug_verification_status.sql
+canva_poster_extracted_text.txt
+canva_vs_list_open_mic_comparison.md
+google_sheets_all_rows_upsert.sql
+google_sheets_all_rows_upsert_last_verified_changes_only.sql
+google_sheets_vs_supabase_compare_report.txt
+new_mics_existing_matches_report.txt
+new_mics_upsert.sql
+update_new_mics_changes_updates_handles.sql
+
+# Superseded local helper scripts
+prepare_july_verification_updates.py

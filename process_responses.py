@@ -9,9 +9,53 @@ and outputs an organized JSON file that can be used to update database tables.
 import json
 import os
 import sys
-from typing import Dict, List, Any
+import argparse
+import hashlib
+import re
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 import pandas as pd
+
+
+DEFAULT_AI_QUEUE_FILE = "ai_parse_queue.json"
+DEFAULT_AI_RESULTS_FILE = "ai_parse_results.json"
+DEFAULT_AI_RESULTS_TEMPLATE_FILE = "ai_parse_results_template.json"
+DEFAULT_SQL_OUTPUT_FILE = "supabase_response_updates.sql"
+
+AI_UPDATE_FIELDS = {
+    "active",
+    "cost",
+    "frequency",
+    "frequency_custom_text",
+    "location",
+    "stage_time",
+    "latest_end_time",
+    "day",
+    "start_time",
+    "venue_name",
+    "open_mic",
+    "sign_up_instructions",
+    "signup_url",
+    "sms_response",
+    "changes_updates",
+    "hosts_organizers",
+    "other_rules",
+}
+
+MONTH_STATUS_COLUMNS = {
+    1: "jan_verification_status",
+    2: "feb_verification_status",
+    3: "mar_verification_status",
+    4: "apr_verification_status",
+    5: "may_verification_status",
+    6: "jun_verification_status",
+    7: "july_verification_status",
+    8: "aug_verification_status",
+    9: "sep_verification_status",
+    10: "oct_verification_status",
+    11: "nov_verification_status",
+    12: "dec_verification_status",
+}
 
 
 def load_instagram_responses(file_path: str = "dm_replies.json") -> Dict[str, Any]:
@@ -49,13 +93,125 @@ def load_sms_responses(file_path: str = "twilio_responses.json") -> Dict[str, An
     if not os.path.exists(file_path):
         print(f"⚠️  SMS responses file not found: {file_path}")
         return {}
-    
+
     try:
         with open(file_path, 'r') as f:
             return json.load(f)
     except Exception as e:
         print(f"❌ Error loading SMS responses: {e}")
         return {}
+
+
+def load_ai_results(file_path: str = DEFAULT_AI_RESULTS_FILE) -> List[Dict[str, Any]]:
+    """Load AI parse results if the handoff file has been filled in."""
+    if not os.path.exists(file_path):
+        return []
+
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"⚠️  Error loading AI results: {e}")
+        return []
+
+    if isinstance(data, dict):
+        results = data.get("results", [])
+    elif isinstance(data, list):
+        results = data
+    else:
+        return []
+
+    return results if isinstance(results, list) else []
+
+
+def default_last_verified() -> str:
+    """Return the current date in MM/DD/YY last_verified format."""
+    return datetime.now().strftime("%m/%d/%y")
+
+
+def default_verification_column() -> str:
+    """Return a month-specific verification status column, matching existing files."""
+    return MONTH_STATUS_COLUMNS[datetime.now().month]
+
+
+def make_queue_id(source: str, contact_info: str, timestamp: str, mic_identifier: str) -> str:
+    """Create a stable, readable handoff ID for matching AI results back later."""
+    safe_contact = contact_info.replace(":", "_").replace("@", "").replace("+", "")
+    seed = f"{source}|{contact_info}|{timestamp}|{mic_identifier}"
+    suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:10]
+    return f"{source}_{safe_contact}_{mic_identifier}_{suffix}"
+
+
+def sql_literal(value: Any) -> str:
+    """Safely format a primitive value for generated SQL."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+
+    text = str(value)
+    return "'" + text.replace("'", "''") + "'"
+
+
+def sql_identifier(name: str) -> str:
+    """Quote a SQL identifier that comes from our fixed allow-list."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def status_label_for_direct_status(status: Any) -> Optional[str]:
+    if status is True:
+        return "responded_confirmed"
+    if status is False:
+        return "responded_confirmed"
+    return None
+
+
+def parse_structured_response(message_text: str) -> Optional[str]:
+    """Parse only clear Y/N/Changes replies; route update-like text to AI."""
+    text = " ".join(str(message_text or "").strip().upper().split())
+    if not text:
+        return None
+
+    change_markers = re.compile(
+        r"\b(CHANGE|CHANGES|UPDATED?|MODIFIED|NOW|STARTS?|TIME|DAY|DATE|NEXT|EVERY OTHER|"
+        r"VENUE|LOCATION|MOVED|COST|SIGN ?UP|REQUIRED|FOLLOW|MONTH|WEEK)\b"
+    )
+    if change_markers.search(text):
+        return "C"
+
+    if re.fullmatch(r"(Y|YES|YEP|YUP|ACTIVE|CONFIRMED?|STILL ACTIVE|SAME|NO CHANGES?)", text):
+        return "Y"
+    if re.fullmatch(r"(N|NO|NOPE|INACTIVE|NOT ACTIVE|CANCELLED|CANCELED|ENDED|DEAD)", text):
+        return "N"
+    if re.fullmatch(r"(C|CHANGE|CHANGES|UPDATES?)", text):
+        return "C"
+
+    return None
+
+
+def parse_structured_numbered_responses(message_text: str) -> Dict[int, str]:
+    """Parse clear numbered Y/N/Changes responses."""
+    results = {}
+    for raw_line in str(message_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        match = re.match(r"^(\d+)[\).:\-\s]+(.+)$", line)
+        if not match:
+            continue
+
+        mic_num = int(match.group(1))
+        status = parse_structured_response(match.group(2))
+        if status:
+            results[mic_num] = status
+
+    return results
+
+
+def should_stamp_last_verified(verification_status: Optional[str]) -> bool:
+    """Only confirmed or changed responses count as a completed verification."""
+    return verification_status in {"responded_confirmed", "responded_changes"}
 
 
 def load_sent_messages(ig_file: str = "ig_sent_messages.json", 
@@ -140,7 +296,8 @@ def parse_response_content(response_data: Any, response_type: str) -> Dict[str, 
         'raw_message': '',
         'timestamp': '',
         'mic_identifiers': [],
-        'recognition_status': 'unrecognized'
+        'recognition_status': 'unrecognized',
+        'message_history': []
     }
     
     try:
@@ -150,18 +307,19 @@ def parse_response_content(response_data: Any, response_type: str) -> Dict[str, 
                 # New format with mic identifiers list
                 messages = response_data['messages']
                 parsed['mic_identifiers'] = response_data.get('mic_identifiers', [])
+                parsed['message_history'] = normalize_message_history(messages)
                 
                 if messages:
                     # Instagram API returns messages in newest-to-oldest order
                     # So the first message [0] is the most recent
                     latest = messages[0] if isinstance(messages, list) else messages
                     
-                    parsed['response_type'] = latest.get('parsed_response')
                     parsed['raw_message'] = latest.get('message', '')
                     parsed['timestamp'] = latest.get('timestamp', '')
+                    parsed['response_type'] = parse_structured_response(parsed['raw_message'])
                     
                     # Parse numbered responses if available
-                    numbered_responses = latest.get('numbered_responses', {})
+                    numbered_responses = parse_structured_numbered_responses(parsed['raw_message'])
                     if numbered_responses:
                         parsed['mic_statuses'] = convert_numbered_responses_to_statuses(numbered_responses)
                         parsed['recognition_status'] = 'recognized'
@@ -175,25 +333,28 @@ def parse_response_content(response_data: Any, response_type: str) -> Dict[str, 
             elif isinstance(response_data, list):
                 # Old format - list of messages
                 latest = response_data[-1] if response_data else {}
-                parsed['response_type'] = latest.get('parsed_response')
                 parsed['raw_message'] = latest.get('message', '')
                 parsed['timestamp'] = latest.get('timestamp', '')
+                parsed['response_type'] = parse_structured_response(parsed['raw_message'])
+                parsed['message_history'] = normalize_message_history(response_data)
                 
             elif isinstance(response_data, dict):
                 # Single message format
-                parsed['response_type'] = response_data.get('parsed_response')
                 parsed['raw_message'] = response_data.get('message', '')
                 parsed['timestamp'] = response_data.get('timestamp', '')
+                parsed['response_type'] = parse_structured_response(parsed['raw_message'])
+                parsed['message_history'] = normalize_message_history([response_data])
         
         elif response_type == 'sms':
             # SMS response format
-            parsed['response_type'] = response_data.get('parsed_response')
             parsed['raw_message'] = response_data.get('message', '')
             parsed['timestamp'] = response_data.get('timestamp', '')
             parsed['mic_identifiers'] = response_data.get('mic_identifiers', [])
+            parsed['response_type'] = parse_structured_response(parsed['raw_message'])
+            parsed['message_history'] = normalize_message_history([response_data])
             
             # Parse numbered responses if available
-            numbered_responses = response_data.get('numbered_responses', {})
+            numbered_responses = parse_structured_numbered_responses(parsed['raw_message'])
             if numbered_responses:
                 parsed['mic_statuses'] = convert_numbered_responses_to_statuses(numbered_responses)
                 parsed['recognition_status'] = 'recognized'
@@ -217,6 +378,31 @@ def convert_numbered_responses_to_statuses(numbered_responses: Dict[int, str]) -
     for mic_position, response in numbered_responses.items():
         statuses[mic_position] = convert_yn_to_boolean(response)
     return statuses
+
+
+def normalize_message_history(messages: Any) -> List[Dict[str, Any]]:
+    """Normalize collected messages into AI-friendly conversation context."""
+    if not isinstance(messages, list):
+        messages = [messages] if messages else []
+
+    history = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+
+        raw_message = message.get("message", "")
+        structured_response = parse_structured_response(raw_message)
+        numbered_responses = parse_structured_numbered_responses(raw_message)
+        history.append({
+            "index": index,
+            "order": "newest_first",
+            "message": raw_message,
+            "timestamp": message.get("timestamp", ""),
+            "deterministic_status": structured_response,
+            "numbered_responses": numbered_responses or None,
+        })
+
+    return history
 
 
 def convert_yn_to_boolean(response: Any) -> Any:
@@ -247,6 +433,8 @@ def organize_responses(ig_responses: Dict, sms_responses: Dict,
     """
     mic_responses = {}  # Grouped by individual mic identifier
     contact_responses = []  # Individual contact responses
+    direct_supabase_updates = []
+    ai_parse_queue = []
     
     # Process Instagram responses
     for username, response_data in ig_responses.items():
@@ -263,29 +451,62 @@ def organize_responses(ig_responses: Dict, sms_responses: Dict,
             'raw_message': parsed['raw_message'],
             'timestamp': parsed['timestamp'],
             'recognition_status': parsed['recognition_status'],
+            'message_history': parsed['message_history'],
             'sent_message_info': ig_sent.get(f"ig_{username}")
         }
         
         contact_responses.append(contact_response)
         
         # Create individual mic responses
-        if parsed['mic_identifiers'] and parsed['mic_statuses']:
-            for position, status in parsed['mic_statuses'].items():
-                # Get the actual mic ID for this position
-                mic_index = int(position) - 1  # Convert 1-based to 0-based
-                if 0 <= mic_index < len(parsed['mic_identifiers']):
-                    mic_id = parsed['mic_identifiers'][mic_index]
-                    
-                    mic_responses[mic_id] = {
-                        'mic_identifier': mic_id,
-                        'status': status,
-                        'contact_method': 'instagram',
-                        'contact_info': contact_info,
-                        'position_in_message': position,
-                        'raw_message': parsed['raw_message'],
-                        'timestamp': parsed['timestamp'],
-                        'recognition_status': parsed['recognition_status']
+        for position, mic_id in enumerate(parsed['mic_identifiers'], 1):
+            status = parsed['mic_statuses'].get(position)
+            if status is None:
+                status = parsed['mic_statuses'].get(str(position))
+
+            mic_record = {
+                'mic_identifier': mic_id,
+                'status': status,
+                'contact_method': 'instagram',
+                'contact_info': contact_info,
+                'position_in_message': position,
+                'raw_message': parsed['raw_message'],
+                'timestamp': parsed['timestamp'],
+                'recognition_status': parsed['recognition_status'],
+                'message_history': parsed['message_history']
+            }
+
+            if status in (True, False):
+                mic_responses[mic_id] = mic_record
+                direct_supabase_updates.append(mic_record)
+            elif parsed['raw_message']:
+                queue_id = make_queue_id("instagram", contact_info, parsed['timestamp'], str(mic_id))
+                ai_parse_queue.append({
+                    "queue_id": queue_id,
+                    "source": "instagram",
+                    "contact_info": contact_info,
+                    "username": username,
+                    "mic_identifier": mic_id,
+                    "position_in_message": position,
+                    "all_mic_identifiers_for_contact": parsed['mic_identifiers'],
+                    "raw_message": parsed['raw_message'],
+                    "timestamp": parsed['timestamp'],
+                    "message_history": parsed['message_history'],
+                    "deterministic_status": parsed['response_type'],
+                    "reason": "changes_or_unclear_response",
+                    "sent_message_info": ig_sent.get(username),
+                    "expected_ai_result_shape": {
+                        "queue_id": queue_id,
+                        "mic_identifier": mic_id,
+                        "active": True,
+                        "verification_status": "responded_changes",
+                        "updates": {
+                            "start_time": "8:00 PM"
+                        },
+                        "confidence": 0.0,
+                        "needs_human_review": True,
+                        "notes": ""
                     }
+                })
     
     # Process SMS responses
     for phone, response_data in sms_responses.items():
@@ -302,33 +523,312 @@ def organize_responses(ig_responses: Dict, sms_responses: Dict,
             'raw_message': parsed['raw_message'],
             'timestamp': parsed['timestamp'],
             'recognition_status': parsed['recognition_status'],
+            'message_history': parsed['message_history'],
             'sent_message_info': sms_sent.get(f"sms_{phone}")
         }
         
         contact_responses.append(contact_response)
         
         # Create individual mic responses
-        if parsed['mic_identifiers'] and parsed['mic_statuses']:
-            for position, status in parsed['mic_statuses'].items():
-                # Get the actual mic ID for this position
-                mic_index = position - 1  # Convert 1-based to 0-based
-                if 0 <= mic_index < len(parsed['mic_identifiers']):
-                    mic_id = parsed['mic_identifiers'][mic_index]
-                    
-                    mic_responses[mic_id] = {
-                        'mic_identifier': mic_id,
-                        'status': status,
-                        'contact_method': 'sms',
-                        'contact_info': contact_info,
-                        'position_in_message': position,
-                        'raw_message': parsed['raw_message'],
-                        'timestamp': parsed['timestamp'],
-                        'recognition_status': parsed['recognition_status']
+        for position, mic_id in enumerate(parsed['mic_identifiers'], 1):
+            status = parsed['mic_statuses'].get(position)
+            if status is None:
+                status = parsed['mic_statuses'].get(str(position))
+
+            mic_record = {
+                'mic_identifier': mic_id,
+                'status': status,
+                'contact_method': 'sms',
+                'contact_info': contact_info,
+                'position_in_message': position,
+                'raw_message': parsed['raw_message'],
+                'timestamp': parsed['timestamp'],
+                'recognition_status': parsed['recognition_status'],
+                'message_history': parsed['message_history']
+            }
+
+            if status in (True, False):
+                mic_responses[mic_id] = mic_record
+                direct_supabase_updates.append(mic_record)
+            elif parsed['raw_message']:
+                queue_id = make_queue_id("sms", contact_info, parsed['timestamp'], str(mic_id))
+                ai_parse_queue.append({
+                    "queue_id": queue_id,
+                    "source": "sms",
+                    "contact_info": contact_info,
+                    "phone_number": phone,
+                    "mic_identifier": mic_id,
+                    "position_in_message": position,
+                    "all_mic_identifiers_for_contact": parsed['mic_identifiers'],
+                    "raw_message": parsed['raw_message'],
+                    "timestamp": parsed['timestamp'],
+                    "message_history": parsed['message_history'],
+                    "deterministic_status": parsed['response_type'],
+                    "reason": "changes_or_unclear_response",
+                    "sent_message_info": sms_sent.get(phone),
+                    "expected_ai_result_shape": {
+                        "queue_id": queue_id,
+                        "mic_identifier": mic_id,
+                        "active": True,
+                        "verification_status": "responded_changes",
+                        "updates": {
+                            "start_time": "8:00 PM"
+                        },
+                        "confidence": 0.0,
+                        "needs_human_review": True,
+                        "notes": ""
                     }
+                })
     
     return {
         'mic_responses': mic_responses,
-        'contact_responses': contact_responses
+        'contact_responses': contact_responses,
+        'direct_supabase_updates': direct_supabase_updates,
+        'ai_parse_queue': ai_parse_queue
+    }
+
+
+def normalize_ai_result_entries(ai_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten supported AI result shapes into mic-level update records."""
+    normalized = []
+
+    for result in ai_results:
+        if not isinstance(result, dict):
+            continue
+
+        if isinstance(result.get("mic_updates"), list):
+            for update in result["mic_updates"]:
+                if isinstance(update, dict):
+                    normalized.append({**result, **update})
+        else:
+            normalized.append(result)
+
+    return normalized
+
+
+def generate_supabase_sql(
+    direct_updates: List[Dict[str, Any]],
+    ai_results: List[Dict[str, Any]],
+    ai_parse_queue: Optional[List[Dict[str, Any]]] = None,
+    output_file: str = DEFAULT_SQL_OUTPUT_FILE,
+    table_name: str = "open_mics_historical",
+    verification_column: Optional[str] = None,
+    last_verified: Optional[str] = None,
+) -> Dict[str, int]:
+    """Write SQL updates for deterministic Y/N replies plus reviewed AI results."""
+    verification_column = verification_column or default_verification_column()
+    last_verified = last_verified or default_last_verified()
+    ai_update_entries = normalize_ai_result_entries(ai_results)
+    queue_by_id = {
+        item.get("queue_id"): item
+        for item in (ai_parse_queue or [])
+        if isinstance(item, dict) and item.get("queue_id")
+    }
+
+    lines = [
+        "-- Generated by process_responses.py",
+        "-- Review before running in Supabase.",
+        "BEGIN;",
+        f"ALTER TABLE {table_name}",
+        f"ADD COLUMN IF NOT EXISTS {sql_identifier(verification_column)} text;",
+        "",
+    ]
+
+    direct_count = 0
+    for update in direct_updates:
+        mic_id = update.get("mic_identifier")
+        status = update.get("status")
+        if not mic_id or status not in (True, False):
+            continue
+
+        assignments = [
+            f"active = {sql_literal(status)}",
+            f"last_verified = {sql_literal(last_verified)}",
+            f"{sql_identifier(verification_column)} = {sql_literal(status_label_for_direct_status(status))}",
+        ]
+
+        raw_response = update.get("raw_message", "")
+        if raw_response and len(raw_response) <= 500:
+            assignments.append(f"-- raw response: {sql_literal(raw_response)}")
+
+        lines.append(
+            f"UPDATE {table_name}\n"
+            f"SET {', '.join(a for a in assignments if not a.startswith('--'))}\n"
+            f"WHERE unique_identifier = {sql_literal(mic_id)};"
+        )
+        if raw_response:
+            lines.append(f"-- raw response for {mic_id}: {raw_response.replace(chr(10), ' ')[:500]}")
+        lines.append("")
+        direct_count += 1
+
+    ai_count = 0
+    for result in ai_update_entries:
+        if not isinstance(result, dict):
+            continue
+
+        queue_item = queue_by_id.get(result.get("queue_id"))
+        mic_id = queue_item.get("mic_identifier") if queue_item else result.get("mic_identifier")
+        if not mic_id:
+            continue
+
+        assignments = []
+        if "active" in result and result.get("active") is not None:
+            assignments.append(f"active = {sql_literal(result.get('active'))}")
+
+        updates = result.get("updates") or result.get("proposed_updates") or {}
+        has_updates = isinstance(updates, dict) and any(value not in (None, "") for value in updates.values())
+        verification_status = result.get("verification_status")
+        if not verification_status:
+            verification_status = "responded_changes" if has_updates or result.get("active") is not None else "responded_unclear"
+
+        if should_stamp_last_verified(verification_status):
+            assignments.append(f"last_verified = {sql_literal(result.get('last_verified') or last_verified)}")
+        assignments.append(f"{sql_identifier(verification_column)} = {sql_literal(verification_status)}")
+
+        if isinstance(updates, dict):
+            for field, value in updates.items():
+                if field in AI_UPDATE_FIELDS and value not in (None, ""):
+                    assignments.append(f"{sql_identifier(field)} = {sql_literal(value)}")
+
+        if not assignments:
+            continue
+
+        lines.append(
+            f"UPDATE {table_name}\n"
+            f"SET {', '.join(assignments)}\n"
+            f"WHERE unique_identifier = {sql_literal(mic_id)};"
+        )
+        note = result.get("notes") or result.get("raw_message")
+        if not note and queue_item:
+            note = queue_item.get("raw_message")
+        if note:
+            lines.append(f"-- AI note for {mic_id}: {str(note).replace(chr(10), ' ')[:500]}")
+        lines.append("")
+        ai_count += 1
+
+    lines.append("COMMIT;")
+    lines.append("")
+
+    with open(output_file, "w") as f:
+        f.write("\n".join(lines))
+
+    return {"direct_sql_updates": direct_count, "ai_sql_updates": ai_count}
+
+
+def save_ai_results_template(ai_parse_queue: List[Dict[str, Any]], output_file: str) -> None:
+    """Write a fill-in template that can be given to an AI parser."""
+    template = {
+        "instructions": (
+            "Fill results with one object per queue item. Keep queue_id and mic_identifier unchanged. "
+            "Use message_history for context; Instagram history is newest_first, so earlier formatted replies may appear after the latest message. "
+            "Put changed Supabase columns inside updates. Use verification_status=responded_changes when updates are needed, "
+            "responded_confirmed when no updates are needed, and responded_unclear when the reply still cannot be interpreted."
+        ),
+        "verification_status_values": [
+            "responded_confirmed",
+            "responded_changes",
+            "responded_unclear",
+        ],
+        "allowed_update_fields": sorted(AI_UPDATE_FIELDS),
+        "results": [
+            item.get("expected_ai_result_shape", {})
+            for item in ai_parse_queue
+        ]
+    }
+
+    with open(output_file, "w") as f:
+        json.dump(template, f, indent=2)
+
+
+def process_response_files(
+    instagram_file: str = "dm_replies.json",
+    sms_file: str = "twilio_responses.json",
+    output_file: str = "processed_responses.json",
+    ai_queue_file: str = DEFAULT_AI_QUEUE_FILE,
+    ai_results_file: str = DEFAULT_AI_RESULTS_FILE,
+    ai_results_template_file: str = DEFAULT_AI_RESULTS_TEMPLATE_FILE,
+    sql_output_file: str = DEFAULT_SQL_OUTPUT_FILE,
+    verification_column: Optional[str] = None,
+    last_verified: Optional[str] = None,
+    table_name: str = "open_mics_historical",
+) -> Dict[str, Any]:
+    """Run the full response processing pipeline and write JSON/SQL outputs."""
+    ig_responses = load_instagram_responses(instagram_file)
+    sms_responses = load_sms_responses(sms_file)
+    sent_messages = load_sent_messages()
+    ig_sent = {k[3:]: v for k, v in sent_messages.items() if k.startswith('ig_')}
+    sms_sent = {k[4:]: v for k, v in sent_messages.items() if k.startswith('sms_')}
+    organized_data = organize_responses(ig_responses, sms_responses, ig_sent, sms_sent)
+    summary = generate_summary(organized_data)
+    ai_results = load_ai_results(ai_results_file)
+
+    output = {
+        'metadata': {
+            'processed_at': datetime.now().isoformat(),
+            'summary': summary,
+            'ai_queue_file': ai_queue_file,
+            'ai_results_file': ai_results_file,
+            'sql_output_file': sql_output_file,
+        },
+        'mic_responses': organized_data['mic_responses'],
+        'contact_responses': organized_data['contact_responses'],
+        'direct_supabase_updates': [
+            {
+                'mic_identifier': mic_data['mic_identifier'],
+                'active': mic_data['status'],
+                'verification_status': status_label_for_direct_status(mic_data['status']),
+                'last_verified': last_verified or default_last_verified(),
+                'contact_method': mic_data['contact_method'],
+                'position_in_response': mic_data['position_in_message'],
+                'raw_response': mic_data['raw_message'][:100] + '...' if len(mic_data['raw_message']) > 100 else mic_data['raw_message']
+            }
+            for mic_data in organized_data['direct_supabase_updates']
+        ],
+        # Backward-compatible alias. This now contains only direct Y/N updates.
+        'supabase_updates': [
+            {
+                'mic_identifier': mic_data['mic_identifier'],
+                'verification_status': mic_data['status'],
+                'last_verified': mic_data['timestamp'],
+                'contact_method': mic_data['contact_method'],
+                'position_in_response': mic_data['position_in_message'],
+                'raw_response': mic_data['raw_message'][:100] + '...' if len(mic_data['raw_message']) > 100 else mic_data['raw_message']
+            }
+            for mic_data in organized_data['direct_supabase_updates']
+        ],
+        'ai_parse_queue': organized_data['ai_parse_queue'],
+        'ai_results_loaded': ai_results,
+    }
+
+    with open(output_file, 'w') as f:
+        json.dump(output, f, indent=2)
+
+    with open(ai_queue_file, 'w') as f:
+        json.dump(organized_data['ai_parse_queue'], f, indent=2)
+
+    save_ai_results_template(organized_data['ai_parse_queue'], ai_results_template_file)
+    sql_counts = generate_supabase_sql(
+        organized_data['direct_supabase_updates'],
+        ai_results,
+        ai_parse_queue=organized_data['ai_parse_queue'],
+        output_file=sql_output_file,
+        table_name=table_name,
+        verification_column=verification_column,
+        last_verified=last_verified,
+    )
+
+    return {
+        "ig_responses": len(ig_responses),
+        "sms_responses": len(sms_responses),
+        "summary": summary,
+        "direct_updates": len(organized_data['direct_supabase_updates']),
+        "ai_queue_items": len(organized_data['ai_parse_queue']),
+        "ai_results_loaded": len(ai_results),
+        "sql_counts": sql_counts,
+        "output_file": output_file,
+        "ai_queue_file": ai_queue_file,
+        "ai_results_template_file": ai_results_template_file,
+        "sql_output_file": sql_output_file,
     }
 
 
@@ -392,71 +892,46 @@ def generate_summary(organized_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def main():
     """Main execution function."""
+    parser = argparse.ArgumentParser(description="Process collected Instagram/SMS replies")
+    parser.add_argument("--instagram-file", default="dm_replies.json")
+    parser.add_argument("--sms-file", default="twilio_responses.json")
+    parser.add_argument("--output-file", default="processed_responses.json")
+    parser.add_argument("--ai-queue-file", default=DEFAULT_AI_QUEUE_FILE)
+    parser.add_argument("--ai-results-file", default=DEFAULT_AI_RESULTS_FILE)
+    parser.add_argument("--ai-results-template-file", default=DEFAULT_AI_RESULTS_TEMPLATE_FILE)
+    parser.add_argument("--sql-output-file", default=DEFAULT_SQL_OUTPUT_FILE)
+    parser.add_argument("--table-name", default="open_mics_historical")
+    parser.add_argument("--verification-column", default=default_verification_column())
+    parser.add_argument("--last-verified", default=default_last_verified())
+    args = parser.parse_args()
+
     print("=" * 70)
     print("📊 PROCESSING RESPONSES")
     print("=" * 70)
     
-    # Load responses
     print("\n📂 Loading collected responses...")
-    ig_responses = load_instagram_responses()
-    sms_responses = load_sms_responses()
-    
-    print(f"   Instagram responses: {len(ig_responses)}")
-    print(f"   SMS responses: {len(sms_responses)}")
-    
-    if len(ig_responses) == 0 and len(sms_responses) == 0:
+    result = process_response_files(
+        instagram_file=args.instagram_file,
+        sms_file=args.sms_file,
+        output_file=args.output_file,
+        ai_queue_file=args.ai_queue_file,
+        ai_results_file=args.ai_results_file,
+        ai_results_template_file=args.ai_results_template_file,
+        sql_output_file=args.sql_output_file,
+        verification_column=args.verification_column,
+        last_verified=args.last_verified,
+        table_name=args.table_name,
+    )
+    summary = result["summary"]
+
+    print(f"   Instagram responses: {result['ig_responses']}")
+    print(f"   SMS responses: {result['sms_responses']}")
+
+    if result["ig_responses"] == 0 and result["sms_responses"] == 0:
         print("\n⚠️  No responses found. Please run collection scripts first:")
         print("   - python collect_instagram_responses.py")
         print("   - python collect_sms_responses.py")
-        sys.exit(0)
-    
-    # Load sent messages and mic mappings
-    print("\n📂 Loading sent messages and mic mappings...")
-    sent_messages = load_sent_messages()
-    
-    # Separate into IG and SMS for compatibility
-    ig_sent = {k[3:]: v for k, v in sent_messages.items() if k.startswith('ig_')}
-    sms_sent = {k[4:]: v for k, v in sent_messages.items() if k.startswith('sms_')}
-    
-    # Organize responses
-    print("\n🔄 Organizing responses...")
-    organized_data = organize_responses(ig_responses, sms_responses, ig_sent, sms_sent)
-    
-    # Generate summary
-    summary = generate_summary(organized_data)
-    
-    # Create output structure optimized for Supabase updates
-    output = {
-        'metadata': {
-            'processed_at': datetime.now().isoformat(),
-            'summary': summary
-        },
-        'mic_responses': organized_data['mic_responses'],  # Individual mic responses by ID
-        'contact_responses': organized_data['contact_responses'],  # Contact-level responses
-        'supabase_updates': [  # Ready-to-use format for database updates
-            {
-                'mic_identifier': mic_id,
-                'verification_status': mic_data['status'],  # True/False/None
-                'last_verified': mic_data['timestamp'],
-                'contact_method': mic_data['contact_method'],
-                'position_in_response': mic_data['position_in_message'],
-                'raw_response': mic_data['raw_message'][:100] + '...' if len(mic_data['raw_message']) > 100 else mic_data['raw_message']
-            }
-            for mic_id, mic_data in organized_data['mic_responses'].items()
-        ]
-    }
-    
-    # Save output
-    output_file = "processed_responses.json"
-    print(f"\n💾 Saving processed data to: {output_file}")
-    
-    try:
-        with open(output_file, 'w') as f:
-            json.dump(output, f, indent=2)
-        print(f"✅ Successfully saved to {output_file}")
-    except Exception as e:
-        print(f"❌ Error saving file: {e}")
-        sys.exit(1)
+        return
     
     # Print summary
     print("\n" + "=" * 70)
@@ -474,18 +949,22 @@ def main():
     print("\nBy contact method:")
     print(f"   📱 Instagram: {summary['by_contact_method']['instagram']}")
     print(f"   💬 SMS: {summary['by_contact_method']['sms']}")
+    print("\nOutputs:")
+    print(f"   Direct Supabase updates: {result['direct_updates']}")
+    print(f"   AI parse queue items: {result['ai_queue_items']}")
+    print(f"   AI results loaded: {result['ai_results_loaded']}")
+    print(f"   Processed JSON: {result['output_file']}")
+    print(f"   AI queue: {result['ai_queue_file']}")
+    print(f"   AI results template: {result['ai_results_template_file']}")
+    print(f"   Supabase SQL: {result['sql_output_file']}")
     print("=" * 70)
     
     print("\n💡 Next steps:")
-    print("   1. Review processed_responses.json")
-    print("   2. Use 'supabase_updates' array to update your database:")
-    print("      - mic_identifier: unique ID for EACH mic")
-    print("      - verification_status: true (active), false (inactive), null (changes/unknown)")
-    print("      - last_verified: timestamp of verification")
-    print("      - position_in_response: which number in the response (1, 2, 3, etc.)")
-    print("   3. Each numbered response creates separate database updates")
+    print("   1. Review supabase_response_updates.sql for direct Y/N updates.")
+    print("   2. Send ai_parse_queue.json to AI for unclear/change replies.")
+    print("   3. Save AI output as ai_parse_results.json, then rerun this script.")
+    print("   4. Review the regenerated SQL before running it in Supabase.")
 
 
 if __name__ == "__main__":
     main()
-

@@ -38,6 +38,7 @@ class InstagramMessagingSystem:
         self.response_log_file = "dm_replies.json"
         self.sent_messages_file = sent_messages_file
         self.mic_mapping_file = mic_mapping_file
+        self.last_collection_error = None
         
         # Login to Instagram
         self.login()
@@ -47,14 +48,19 @@ class InstagramMessagingSystem:
         self.load_sent_messages()
         self.load_mic_mapping()
     
-    def login(self):
-        """Login to Instagram with saved settings."""
-        if os.path.exists("dump.json"):
-            self.cl.load_settings("dump.json")
-            self.cl.login(self.username, self.password)
-        else:
-            self.cl.login(self.username, self.password)
-            self.cl.dump_settings('dump.json')
+    def login(self, force_relogin: bool = False):
+        """Login to Instagram, refreshing saved settings when the session expires."""
+        if os.path.exists("dump.json") and not force_relogin:
+            try:
+                self.cl.load_settings("dump.json")
+                self.cl.login(self.username, self.password)
+                return
+            except Exception as e:
+                print(f"Saved Instagram session failed, trying a fresh login: {e}")
+
+        self.cl = Client()
+        self.cl.login(self.username, self.password)
+        self.cl.dump_settings('dump.json')
     
     def load_responses(self):
         """Load previously received responses from file."""
@@ -161,11 +167,22 @@ class InstagramMessagingSystem:
                 user_id = self.cl.user_id_from_username(clean_username)
                 self.cl.direct_send(message, [user_id])
                 
-                # Store the message info
+                # Store the message info. If a host receives split messages, keep
+                # the earliest sent_at so later collection includes replies to all parts.
+                now_iso = datetime.now(timezone.utc).isoformat()
+                existing_sent_info = self.sent_messages.get(clean_username, {})
+                sent_history = existing_sent_info.get('messages', [])
+                if not isinstance(sent_history, list):
+                    sent_history = []
+                sent_history.append({
+                    'sent_at': now_iso,
+                    'message': message,
+                })
                 self.sent_messages[clean_username] = {
                     'user_id': user_id,
-                    'sent_at': datetime.now(timezone.utc).isoformat(),
-                    'message': message
+                    'sent_at': existing_sent_info.get('sent_at') or now_iso,
+                    'message': message,
+                    'messages': sent_history,
                 }
                 
                 results[clean_username] = user_id
@@ -244,16 +261,25 @@ class InstagramMessagingSystem:
         Returns:
             Parsed response ('Y', 'N', 'C') or None if not recognized
         """
-        text = message_text.strip().upper()
-        
-        # Look for Y/N/C patterns
-        # Check for exact 'Y' first, then other patterns
-        if text == 'Y' or any(word in text for word in ['YES', 'Y ', ' Y ', 'CONFIRM', 'ACTIVE', 'Y!', ' Y.', ' Y\n', '\nY']):
-            return 'Y'
-        elif text == 'N' or any(word in text for word in ['NO', ' N ', ' N.', 'INACTIVE', 'NOT ACTIVE', 'N!', ' N\n', '\nN']):
-            return 'N'
-        elif text == 'C' or any(word in text for word in ['CHANGE', 'CHANGES', 'C ', ' C', 'UPDATED', 'MODIFIED', ' C\n', '\nC']):
-            return 'C'
+        import re
+
+        text = " ".join(message_text.strip().upper().split())
+        if not text:
+            return None
+
+        change_markers = re.compile(
+            r"\b(CHANGE|CHANGES|UPDATED?|MODIFIED|NOW|STARTS?|TIME|DAY|DATE|NEXT|EVERY OTHER|"
+            r"VENUE|LOCATION|MOVED|COST|SIGN ?UP|REQUIRED|FOLLOW|MONTH|WEEK)\b"
+        )
+        if change_markers.search(text):
+            return "C"
+
+        if re.fullmatch(r"(Y|YES|YEP|YUP|ACTIVE|CONFIRMED?|STILL ACTIVE|SAME|NO CHANGES?)", text):
+            return "Y"
+        if re.fullmatch(r"(N|NO|NOPE|INACTIVE|NOT ACTIVE|CANCELLED|CANCELED|ENDED|DEAD)", text):
+            return "N"
+        if re.fullmatch(r"(C|CHANGE|CHANGES|UPDATES?)", text):
+            return "C"
         
         return None
     
@@ -293,7 +319,7 @@ class InstagramMessagingSystem:
         
         return results
     
-    def collect_responses(self, amount: int = 100) -> Dict[str, List[str]]:
+    def collect_responses(self, amount: int = 250, usernames: Optional[List[str]] = None) -> Dict[str, List[str]]:
         """
         Collect responses from the usernames you sent messages to.
         Fetches DM threads and messages, matching them with sent messages.
@@ -306,18 +332,33 @@ class InstagramMessagingSystem:
         """
         # Removed verbose header prints
         
+        self.last_collection_error = None
+
         # Fetch DM threads
         try:
             threads = self.cl.direct_threads(amount=amount)
             time.sleep(random.uniform(0.5, 1))
         except Exception as e:
-            print(f"Error fetching threads: {e}")
-            return {}
+            if "login_required" in str(e).lower():
+                print("Instagram session expired, refreshing login and retrying once...")
+                try:
+                    self.login(force_relogin=True)
+                    threads = self.cl.direct_threads(amount=amount)
+                    time.sleep(random.uniform(0.5, 1))
+                except Exception as retry_error:
+                    self.last_collection_error = retry_error
+                    print(f"Error fetching threads after fresh login: {retry_error}")
+                    return {}
+            else:
+                self.last_collection_error = e
+                print(f"Error fetching threads: {e}")
+                return {}
         
         responses_found = 0
+        target_usernames = usernames or list(self.sent_messages.keys())
         
         # Iterate through sent usernames and find their threads
-        for username in self.sent_messages.keys():
+        for username in target_usernames:
             try:
                 clean_username = username.strip("@").strip()
                 
@@ -360,7 +401,7 @@ class InstagramMessagingSystem:
                 # Filter messages that are replies from the user (not from us) AND after our sent message
                 user_msgs = []
                 for m in messages:
-                    if m.user_id == user_id and m.text:
+                    if m.user_id == user_id:
                         # Check if message was sent after our outbound message
                         # instagrapi uses 'timestamp' attribute, not 'created_at'
                         message_time = getattr(m, 'timestamp', None)
@@ -382,13 +423,18 @@ class InstagramMessagingSystem:
                         # Only collect messages sent AFTER our outbound message
                         if sent_at_time and message_time and message_time <= sent_at_time:
                             continue  # Skip messages from before our outbound message
+
+                        message_text = (getattr(m, 'text', None) or "").strip()
+                        if not message_text:
+                            item_type = getattr(m, 'item_type', None) or getattr(m, 'type', None) or "non_text"
+                            message_text = f"[non-text Instagram response: {item_type}]"
                         
                         # Store with parsed response (both simple and numbered)
-                        parsed_response = self.parse_response(m.text)
-                        numbered_responses = self.parse_numbered_responses(m.text)
+                        parsed_response = self.parse_response(message_text)
+                        numbered_responses = self.parse_numbered_responses(message_text)
                         
                         msg_data = {
-                            'message': m.text,
+                            'message': message_text,
                             'parsed_response': parsed_response,
                             'numbered_responses': numbered_responses if numbered_responses else None,
                             'timestamp': message_time.isoformat() if message_time else datetime.now(timezone.utc).isoformat()
@@ -559,4 +605,3 @@ Can you confirm that your mic is active and lmk about any changes?"""
 
 if __name__ == "__main__":
     main()
-

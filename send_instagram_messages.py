@@ -13,6 +13,37 @@ import os
 from dotenv import load_dotenv
 from typing import Dict, List
 from datetime import datetime
+import re
+import argparse
+
+
+def normalize_instagram_handle(value) -> str:
+    """Return a clean Instagram handle without @, or an empty string if invalid."""
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none", "null", "#n/a", "n/a", "no", "unknown"}:
+        return ""
+    if "http://" in text.lower() or "https://" in text.lower() or "instagram.com" in text.lower():
+        return ""
+    if re.fullmatch(r"[+()\d\s.-]{7,}", text):
+        return ""
+
+    if "@" in text:
+        match = re.search(r"@([A-Za-z0-9._]{1,30})\b", text)
+        if not match:
+            return ""
+        handle = match.group(1)
+    else:
+        handle = text
+
+    if not re.fullmatch(r"[A-Za-z0-9._]{3,30}", handle):
+        return ""
+    if not re.search(r"[A-Za-z]", handle):
+        return ""
+
+    return handle
 
 
 def group_mics_by_instagram_handle(df: pd.DataFrame) -> Dict[str, List[Dict]]:
@@ -27,33 +58,16 @@ def group_mics_by_instagram_handle(df: pd.DataFrame) -> Dict[str, List[Dict]]:
     """
     grouped = {}
     
-    print("🔍 Filtering for Instagram/DM preference...")
+    print("🔍 Filtering for valid Instagram handles...")
+
+    instagram_rows = df[df["changes_updates"].apply(lambda value: bool(normalize_instagram_handle(value)))]
+
+    print(f"   📱 {len(df)} total rows → {len(instagram_rows)} rows with valid Instagram handles")
     
-    # Apply Instagram preference filter: sms_response in ('refuse to', '#N/A', 'N/A') OR sms_response is null
-    instagram_preferred = df[
-        df['changes_updates'].notna() &  # Must have Instagram handle
-        (df['changes_updates'] != '') &  # Not empty
-        (df['changes_updates'].astype(str) != 'nan') &  # Not string 'nan'
-        (
-            df['sms_response'].isin(['refuse to', '#N/A', 'N/A']) |  # Refuses SMS
-            df['sms_response'].isna() |  # No SMS provided
-            (df['sms_response'].astype(str).str.strip() == '') |  # Empty SMS
-            (df['sms_response'].astype(str) == 'nan')  # String 'nan'
-        )
-    ]
-    
-    print(f"   📱 {len(df)} total rows → {len(instagram_preferred)} Instagram preferred")
-    
-    for _, row in instagram_preferred.iterrows():
-        handle = str(row['changes_updates']).strip()
-        
-        # Skip invalid handles (shouldn't happen after filtering but safety check)
-        if handle in ['nan', '#N/A', '']:
+    for _, row in instagram_rows.iterrows():
+        handle = normalize_instagram_handle(row["changes_updates"])
+        if not handle:
             continue
-        
-        # Remove @ if present
-        if handle.startswith('@'):
-            handle = handle[1:]
         
         # Create mic info dict
         mic_info = {
@@ -64,6 +78,7 @@ def group_mics_by_instagram_handle(df: pd.DataFrame) -> Dict[str, List[Dict]]:
             'venue': row.get('venue_name', ''),
             'location': row.get('location', ''),
             'borough': row.get('borough', ''),
+            'message_number': row.get('aug_message_number', row.get('message_number', '')),
         }
         
         if handle not in grouped:
@@ -91,11 +106,12 @@ def create_message_for_host(handle: str, mics: List[Dict], form_link: str = None
     # Build mic list with simple format for parsing
     mic_list = []
     for i, mic in enumerate(mics, 1):
+        display_number = mic.get('message_number') or i
         mic_name = mic['name']
         if mic['day'] and mic['time']:
-            mic_line = f"{i}. {mic_name} ({mic['day']} at {mic['time']})"
+            mic_line = f"{display_number}. {mic_name} ({mic['day']} at {mic['time']})"
         else:
-            mic_line = f"{i}. {mic_name}"
+            mic_line = f"{display_number}. {mic_name}"
         
         mic_list.append(mic_line)
     
@@ -136,13 +152,18 @@ def main():
     print("📤 INSTAGRAM MESSAGE SENDER")
     print("=" * 70)
     
+    parser = argparse.ArgumentParser(description="Send Instagram verification DMs")
+    parser.add_argument("csv_file", nargs="?", help="CSV file containing mics to verify")
+    parser.add_argument("--no-form-link", action="store_true", help="Do not include CHANGES_FORM_LINK in messages")
+    args = parser.parse_args()
+
     # Load environment variables for form link
     load_dotenv()
-    form_link = os.getenv("CHANGES_FORM_LINK")
+    form_link = None if args.no_form_link else os.getenv("CHANGES_FORM_LINK")
     
     # Get CSV file path
-    if len(sys.argv) > 1:
-        csv_file = sys.argv[1]
+    if args.csv_file:
+        csv_file = args.csv_file
     else:
         csv_file = input("Enter the path to your CSV file (default: active_to_confirm_NY.csv): ").strip()
         if not csv_file:
@@ -171,7 +192,7 @@ def main():
     # Group mics by Instagram handle (with Instagram preference filtering)
     print("\n📋 Grouping mics by Instagram handle...")
     grouped_mics = group_mics_by_instagram_handle(df)
-    print(f"   Found {len(grouped_mics)} unique Instagram handles (Instagram preferred only)")
+    print(f"   Found {len(grouped_mics)} unique Instagram handles")
     
     # Show preview
     total_mics = sum(len(mics) for mics in grouped_mics.values())
@@ -209,23 +230,33 @@ def main():
     print("\n📤 Sending messages...")
     results = {}
     
-    # Create username to mic identifier mapping for all mics
-    username_to_mics = {}
-    for handle, mics in grouped_mics.items():
-        username_to_mics[handle] = [mic['unique_id'] for mic in mics]
-    
-    # Store the mapping in the messaging system (username -> list of mic IDs)
-    messaging_system.mic_identifier_mapping = username_to_mics
-    
-    # Save the mapping
-    messaging_system.save_mic_mapping()
+    def send_succeeded(result_value) -> bool:
+        if not result_value:
+            return False
+        if isinstance(result_value, str):
+            return not (
+                result_value.startswith("Error")
+                or result_value.startswith("User")
+                or result_value.startswith("Invalid")
+            )
+        return True
     
     for handle, mics in sorted(grouped_mics.items()):
         message = create_message_for_host(handle, mics, form_link)
         
         try:
             result = messaging_system.send_message_to_usernames([handle], message)
-            results[handle] = result.get(handle, "Error")
+            result_value = result.get(handle, "Error")
+            results[handle] = result_value
+            if send_succeeded(result_value):
+                existing_mic_ids = messaging_system.mic_identifier_mapping.get(handle, [])
+                if not isinstance(existing_mic_ids, list):
+                    existing_mic_ids = [existing_mic_ids] if existing_mic_ids else []
+                for mic_id in [mic['unique_id'] for mic in mics]:
+                    if mic_id and mic_id not in existing_mic_ids:
+                        existing_mic_ids.append(mic_id)
+                messaging_system.mic_identifier_mapping[handle] = existing_mic_ids
+                messaging_system.save_mic_mapping()
         except Exception as e:
             print(f"❌ Error sending to @{handle}: {e}")
             results[handle] = f"Error: {str(e)}"
@@ -235,7 +266,7 @@ def main():
     print("📊 SENDING COMPLETE")
     print("=" * 70)
     
-    successful = sum(1 for r in results.values() if not isinstance(r, str) or not r.startswith("Error"))
+    successful = sum(1 for r in results.values() if send_succeeded(r))
     failed = len(results) - successful
     
     print(f"✅ Successfully sent: {successful}/{len(results)}")
@@ -261,4 +292,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -1,9 +1,15 @@
 import os
 import json
 import sys
+from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from typing import List
+
+
+def current_last_verified() -> str:
+    """Return today's date in MM/DD/YY last_verified format."""
+    return datetime.now().strftime("%m/%d/%y")
 
 
 def get_active_mic_ids(processed_responses_file: str = "processed_responses.json") -> List[str]:
@@ -79,6 +85,7 @@ def get_inactive_mic_ids(processed_responses_file: str = "processed_responses.js
 if __name__ == "__main__": 
     # Get filename from command line argument or use default
     filename = sys.argv[1] if len(sys.argv) > 1 else "processed_responses.json"
+    last_verified = sys.argv[2] if len(sys.argv) > 2 else current_last_verified()
     
     load_dotenv()
     url: str = os.environ.get("SUPABASE_URL")
@@ -89,7 +96,7 @@ if __name__ == "__main__":
     if active_ids: 
         response = (
             supabase.table("open_mics_historical")
-                .update({"active": True, "last_verified": "11/10"})
+                .update({"active": True, "last_verified": last_verified})
                 .in_("unique_identifier", active_ids)
                 .execute()
         )
@@ -100,7 +107,9 @@ if __name__ == "__main__":
     if inactive_ids: 
         response = (
             supabase.table("open_mics_historical")
-                .update({"active": False, "last_verified": "11/10"})
+                .update({"active": False, "last_verified": last_verified})
                 .in_("unique_identifier", inactive_ids)
                 .execute()
         )
+
+    print(f"Updated last_verified to {last_verified}")

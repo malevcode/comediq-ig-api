@@ -1,354 +1,347 @@
 # Comediq Open Mic Verification System
 
-Automated system for monthly open mic verification via Instagram DMs and SMS with multi-mic support and database integration.
+Automated monthly open mic verification through Instagram DMs and SMS, with multi-mic host grouping, timestamp-filtered response collection, AI-assisted parsing for unclear replies, and reviewable Supabase SQL output.
 
-## 🎯 Overview
+For the detailed current Instagram workflow, see [INSTAGRAM_RESPONSE_WORKFLOW.md](INSTAGRAM_RESPONSE_WORKFLOW.md).
 
-Automates monthly verification by:
-- **Smart Routing**: Instagram vs SMS based on contact preferences
-- **Multi-Mic Support**: Groups mics by host, handles numbered responses ("1 Y, 2 N, 3 Changes") 
-- **Timestamp Filtering**: Only collects new responses after sending messages
-- **Database Ready**: Processes responses for Supabase integration
-- **Configurable Files**: Custom file paths for different campaigns
+## Overview
 
-## 📁 Core Files
+This system helps you:
 
-**Messaging Systems:**
-- `ig_messaging.py` - Instagram DM system with timezone-aware filtering
-- `twilio_messaging.py` - SMS system with E.164 formatting
+- Send one grouped verification DM per Instagram host.
+- Track which mic IDs were sent to each handle.
+- Collect only replies that happened after your sent message.
+- Map clear formatted replies directly to mics.
+- Save change/unclear replies into an AI parsing queue.
+- Map AI results back to original mic IDs.
+- Generate SQL for Supabase updates.
+- Classify full-list statuses such as `no_response` and `not_sent`.
 
-**Scripts:**
-- `send_*.py` - Send messages (takes CSV file only)
-- `collect_*_responses.py` - Collect responses (supports custom file paths)
-- `process_responses.py` - Convert to database format
-- `update_supabase.py` - Push active/inactive mics to database
-
-## 🚀 Quick Start
-
-### 1. Environment Setup
-
-Create a `.env` file in the project root with the following variables:
-
-**For Instagram:**
-```
-IG_USER=your_instagram_username
-IG_PASSWORD=your_instagram_password
-```
-
-**For SMS (Twilio):**
-```
-TWILIO_ACCOUNT_SID=your_account_sid
-TWILIO_AUTH_TOKEN=your_auth_token
-TWILIO_PHONE_NUMBER=your_twilio_phone_number
-```
-
-**For Supabase (database updates):**
-```
-SUPABASE_URL=your_supabase_project_url
-SUPABASE_KEY=your_supabase_anon_key
-```
-
-**Optional (for changes form):**
-```
-CHANGES_FORM_LINK=https://your-form-link.com
-```
-
-### 2. Install Dependencies
+## Setup
 
 ```bash
-# Create virtual environment
 python3 -m venv venv
-
-# Activate virtual environment
-source venv/bin/activate  # On macOS/Linux
-# or
-venv\Scripts\activate     # On Windows
-
-# Install dependencies
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Prepare Your Data
+Create `.env`:
 
-Ensure your CSV file has the following columns:
-- `open_mic`: Name of the open mic
-- `changes_updates`: Instagram handle (for Instagram messaging)
-- `sms_response`: Phone number (for SMS messaging)
-- `day`: Day of the week
-- `start_time`: Start time
-- `venue_name`: Venue name
-- `location`: Full address
-- `unique_identifier`: Unique ID for each mic
+```env
+IG_USER=your_instagram_username
+IG_PASSWORD=your_instagram_password
 
-## 📤 Sending Messages
+# Optional SMS/Twilio
+TWILIO_ACCOUNT_SID=your_account_sid
+TWILIO_AUTH_TOKEN=your_auth_token
+TWILIO_PHONE_NUMBER=+1234567890
 
-All send scripts take only a CSV file - they create tracking files automatically.
+# Optional link included in Instagram messages
+CHANGES_FORM_LINK=https://your-form-link.com
+```
+
+`dump.json` stores the Instagram session after login. Keep it unless Instagram login starts failing.
+
+## Input CSV
+
+Instagram sending expects:
+
+| Column | Required | Purpose |
+|---|---:|---|
+| `unique_identifier` | Yes | Mic ID used to update Supabase |
+| `open_mic` | Yes | Mic name shown in the DM |
+| `changes_updates` | Yes | Instagram handle |
+| `day` | Recommended | Day shown in the DM |
+| `start_time` | Recommended | Start time shown in the DM |
+| `venue_name` | Optional | Venue context |
+| `location` | Optional | Address context |
+
+SMS scripts use `sms_response` for phone numbers.
+
+## Core Scripts
+
+| Script | Purpose |
+|---|---|
+| `send_instagram_messages.py` | Send grouped Instagram DMs by valid handle |
+| `collect_instagram_responses.py` | Collect Instagram replies and automatically process outputs |
+| `process_responses.py` | Build direct updates, AI queue, AI-result mapping, and SQL |
+| `prepare_monthly_verification_updates.py` | Build full-list monthly status CSVs |
+| `update_monthly_verification_supabase.py` | Dry-run/apply full-list monthly CSV updates |
+| `send_sms_messages.py` | Send grouped SMS messages |
+| `collect_sms_responses.py` | Collect SMS replies |
+
+## Sending Instagram DMs
 
 ```bash
-# Instagram (Instagram-preferred contacts)
-python send_instagram_messages.py [csv_file]
-
-# SMS (SMS-preferred contacts) 
-python send_sms_messages.py [csv_file]
-
-# SMS Fallback via Instagram (when Twilio is down)
-python send_dual_contact_instagram_messages.py [csv_file]
+source venv/bin/activate
+python send_instagram_messages.py /path/to/current_mics.csv
 ```
 
-**Key Features:**
-- **Multi-mic grouping** by contact (Instagram handle or phone)
-- **E.164 phone formatting** for SMS (+15551234567)
-- **Rate limiting** to avoid platform restrictions
-- **Timezone-aware** message tracking for response filtering
+This creates or updates:
 
-## 💬 Message Format
+- `ig_sent_messages.json`
+- `ig_mic_mapping.json`
 
-Messages are automatically personalized with:
-- **Current month name** (e.g., "September mic list")
-- **All mics listed by the host** with day, time, and venue
-- **Clear instructions** for response
-- **Optional changes form link** (if configured in `.env`)
+The message format asks for:
 
-### Example Message
+- `Y` / `Yes` if active with no changes
+- `N` / `No` if inactive
+- `Changes` if updates are needed
+- numbered responses for hosts with multiple mics, such as `1 Y`, `2 N`, `3 Changes`
 
-**For hosts with multiple mics:**
-```
-Hey @username! It's Adam from Comediq! I'm doing the monthly check in to update our November mic list. For each mic, reply with the number and status:
+## Collecting Instagram Responses
 
-Reply format: [number] Y/N/Changes
-
-Here's what we have listed:
-
-1. Bushwick Comedy Club (Tuesday at 7:00 PM)
-2. Another Mic (Wednesday at 8:00 PM)
-
-Please respond with updates for each mic. Thanks!
-```
-
-**For hosts with a single mic:**
-```
-Hey @username! It's Adam from Comediq! I'm doing the monthly check in to update our November mic list. Please reply:
-
-Reply: Y (active), N (not active), or Changes (has updates)
-
-Here's what we have listed:
-
-1. My Mic Name (Monday at 8:00 PM)
-
-Please respond with updates for each mic. Thanks!
-```
-
-### Response Format & Multi-Mic Support
-
-**Single Mic Response:**
-- Reply: `Y`, `N`, or `Changes`
-- Applied to their one mic
-
-**Multiple Mic Response:**  
-- Numbered format: `1 Y`, `2 N`, `3 Changes` (one per line)
-- Simple format: `Y` (applied to ALL their mics)
-
-**Status Conversion:**
-- `Y`/`Yes`/`Active` → `True` (active)  
-- `N`/`No`/`Inactive` → `False` (inactive)
-- `C`/`Changes` → `None` (needs updates)
-
-**Example Multi-Mic Response:**
-```
-1 Y
-2 N  
-3 Changes
-```
-
-This creates individual database entries for each mic with their respective statuses.
-
-See [RESPONSE_FORMAT.md](RESPONSE_FORMAT.md) for detailed parsing documentation.
-
-## 📥 Collecting Responses
-
-Collect scripts support custom file paths for different campaigns:
+Collect all current-round replies:
 
 ```bash
-# Use default files
-python collect_instagram_responses.py
-python collect_sms_responses.py
-
-# Use custom files  
-python collect_instagram_responses.py custom_sent_messages.json custom_mic_mapping.json
-python collect_sms_responses.py custom_twilio_sent.json custom_twilio_mapping.json
+python collect_instagram_responses.py --amount 300
 ```
 
-**Smart Filtering:**
-- **Timezone-aware**: Only collects responses after your sent messages (no old thread history)
-- **Exact matching**: "Y" responses now parse correctly (was mapping to null)
-- **UTC conversion**: Handles local time differences properly
-
-## 🔄 Processing & Database Updates
+Collect only sent handles that do not already have a `dm_replies.json` entry:
 
 ```bash
-# Process responses to database format
+python collect_instagram_responses.py --missing-only --amount 300
+```
+
+Preview missing handles without logging into Instagram:
+
+```bash
+python collect_instagram_responses.py --missing-only --dry-run
+```
+
+Collect one handle:
+
+```bash
+python collect_instagram_responses.py --username paulzachcomedy --amount 300
+```
+
+Collection writes `dm_replies.json` and automatically runs `process_responses.py`.
+
+## Processing Outputs
+
+You can rerun processing anytime:
+
+```bash
 python process_responses.py
-
-# Update Supabase with active/inactive mics
-python update_supabase.py [processed_responses_file]
 ```
 
-**Response Processing:**
-- **Per-mic entries**: One database row per mic (not per contact)
-- **Multi-mic parsing**: "1 Y, 2 N, 3 Changes" → 3 separate entries  
-- **Status conversion**: Y→true, N→false, Changes→null
-- **Supabase integration**: Extract active/inactive mic IDs for database updates
+It writes:
 
-## 📊 Response Processing Features
+- `processed_responses.json`: structured response summary
+- `ai_parse_queue.json`: unclear/change replies that need AI or human parsing
+- `ai_parse_results_template.json`: template for parsed queue results
+- `ai_parse_results.json`: parsed queue results, if present
+- `supabase_response_updates.sql`: reviewable SQL for Supabase
 
-**Multi-Platform Support:**
-- Instagram DM responses via Meta Basic Display API
-- SMS responses via Twilio API
-- **Message Ordering**: Uses newest-first Instagram API ordering (messages[0])
+The processor re-parses raw message text on every run. It does not blindly trust stale `parsed_response` values stored in `dm_replies.json`.
 
-**Response Parsing:**
-- **Y/Yes/Active** → Database: `true` (mic is active)
-- **N/No/Inactive** → Database: `false` (mic inactive)  
-- **C/Changes** → Database: `null` (needs updates)
+## Direct Mapping Vs AI Queue
 
-**Multi-Mic Intelligence:**
-- Numbered responses: "1 Y, 2 N, 3 Changes" creates 3 database entries
-- Simple responses: "Y" applied to ALL mics for that contact
-- **Individual tracking**: Each mic gets separate database row
+Directly mapped:
 
-## 🔄 Complete Workflow
+- `Y`, `Yes`, `Yup`
+- `N`, `No`, `Inactive`
+- clear numbered responses such as `1 Y`, `2 N`
 
-```bash
-# 1. Send messages (choose platform)
-python send_instagram_messages.py mics.csv
-python send_sms_messages.py mics.csv
+Queued for AI/human parsing:
 
-# 2. Wait for responses
+- "It now starts at 7:15"
+- "Every other Wednesday"
+- "Sign up required"
+- "We added a Sunday 6pm mic"
+- "This is the full schedule"
+- non-text or unclear replies
 
-# 3. Collect responses (timestamp-filtered)
-python collect_instagram_responses.py
-python collect_sms_responses.py
+AI queue items include `message_history` in newest-first order, so a later ambiguous message can be interpreted with earlier formatted replies.
 
-# 4. Process for database  
-python process_responses.py
+## AI Parse Results
 
-# 5. Update Supabase
-python update_supabase.py processed_responses.json
-```
+When `ai_parse_queue.json` has items, create or edit `ai_parse_results.json`.
 
-## 📋 Database Output Format
+Each result should keep `queue_id` and `mic_identifier` unchanged:
 
-### processed_responses.json Structure
-
-**Individual Mic Entries:**
 ```json
-[
-  {
-    "comediq_id": "amazing_mic_comedy_club_monday",
-    "status": true,
-    "response_timestamp": "2024-01-15T08:00:00Z"
+{
+  "queue_id": "original_queue_id",
+  "mic_identifier": "original_mic_id",
+  "verification_status": "responded_changes",
+  "active": true,
+  "updates": {
+    "start_time": "7:15 PM"
   },
-  {
-    "comediq_id": "another_mic_tuesday", 
-    "status": false,
-    "response_timestamp": "2024-01-15T08:00:00Z"
-  },
-  {
-    "comediq_id": "third_mic_changes_needed",
-    "status": null,
-    "response_timestamp": "2024-01-15T08:00:00Z" 
-  }
-]
+  "confidence": 0.98,
+  "needs_human_review": false,
+  "notes": "Host says it now starts at 7:15."
+}
 ```
 
-**Multi-Mic Response Example:**
-- Host response: "1 Y, 2 N, 3 Changes" 
-- Creates 3 separate database entries as shown above
-- Each mic gets individual `comediq_id` and `status`
-```
+Supported `updates` fields:
 
-## ⚠️ Key Features & Notes
+- `active`
+- `changes_updates`
+- `cost`
+- `day`
+- `frequency`
+- `frequency_custom_text`
+- `hosts_organizers`
+- `latest_end_time`
+- `location`
+- `open_mic`
+- `other_rules`
+- `sign_up_instructions`
+- `signup_url`
+- `sms_response`
+- `stage_time`
+- `start_time`
+- `venue_name`
 
-**Recent Improvements:**
-- ✅ **Fixed "Y" parsing**: Single-character responses now parse correctly
-- ✅ **Timezone-aware filtering**: Only new responses collected (no old history)
-- ✅ **Configurable file paths**: Custom files for different campaigns  
-- ✅ **Supabase integration**: Direct database updates for active/inactive mics
-- ✅ **Security audit**: Removed exposed credentials and phone numbers
+After editing AI results:
 
-**Data Safety:**
-- **Timestamp filtering**: Only collects responses after sent messages
-- **Merge operations**: Scripts don't overwrite existing data
-- **Individual tracking**: One database entry per mic (not per contact)
-
-## 🛠️ Troubleshooting
-
-### Common Issues
-
-**Instagram:**
-- Rate limits: Wait 1+ hour between runs
-- Login: May require 2FA on first use
-- Handles: Verify in CSV `changes_updates` column
-
-**SMS:**  
-- Phone format: Auto-converts to E.164 (+15551234567)
-- Twilio auth: Check credentials in `.env`
-- Delivery fails: Use Instagram fallback script
-
-**Responses:**
-- "Y" not parsing: ✅ Fixed in latest version
-- Old messages: ✅ Now filters by timestamp  
-- Multi-mic: Use "1 Y, 2 N, 3 Changes" format
-
-## 🔐 Security
-
-- Store credentials in `.env` file only
-- Never commit `.env` to version control
-- Review `.gitignore` to ensure sensitive files are excluded
-- Rotate credentials periodically
-
-## 📝 CSV Column Reference
-
-| Column Name | Required | Description |
-|------------|----------|-------------|
-| `unique_identifier` | Yes | Unique ID for each mic |
-| `open_mic` | Yes | Name of the open mic |
-| `day` | Recommended | Day of the week |
-| `start_time` | Recommended | Start time |
-| `venue_name` | Recommended | Venue name |
-| `location` | Recommended | Full address |
-| `changes_updates` | Yes (IG) | Instagram handle (for Instagram messaging) |
-| `sms_response` | Yes (SMS) | Phone number (for SMS messaging) |
-| `borough` | Optional | Borough/area |
-
-**Multi-Contact Support:**
-- Contacts can have both Instagram AND phone number
-- System chooses primary contact method based on data availability  
-- SMS fallback script reaches SMS contacts via Instagram
-
-## 📞 Support
-
-Check console output and generated JSON files for debugging.
-
-## 🎓 Advanced Usage
-
-**Custom File Paths:**
 ```bash
-# Different campaigns
-python collect_instagram_responses.py campaign_nov_sent.json campaign_nov_mapping.json
+python process_responses.py
 ```
 
-**Batch Processing:**
+## Status Values
+
+Monthly verification columns such as `aug_verification_status` use:
+
+| Status | Meaning |
+|---|---|
+| `responded_confirmed` | Host confirmed; no update needed |
+| `responded_changes` | Host responded and an update is needed |
+| `responded_unclear` | Host responded but status/changes cannot be safely determined |
+| `no_response` | Valid Instagram handle but no response collected |
+| `not_sent` | No valid Instagram handle |
+
+`last_verified` uses `MM/DD/YY`.
+
+`last_verified` is only updated for:
+
+- `responded_confirmed`
+- `responded_changes`
+
+It is not updated for:
+
+- `responded_unclear`
+- `no_response`
+- `not_sent`
+
+## Supabase SQL
+
+Review generated SQL before running:
+
 ```bash
-for file in *.csv; do
-  python send_instagram_messages.py "$file"
-  sleep 300  # Wait between batches
-done
+less supabase_response_updates.sql
+grep -n "AI note" supabase_response_updates.sql
+grep -n "responded_unclear" supabase_response_updates.sql
 ```
 
-**Message Templates:**
-- Edit `create_message_for_host()` in send scripts
-- Customize `parse_response()` in messaging systems
+Then run `supabase_response_updates.sql` in the Supabase SQL editor.
 
----
-*Internal Comediq tool - See console output for detailed logging*
+Notes:
+
+- The SQL updates existing rows by text `unique_identifier`.
+- It does not insert brand-new mics.
+- New mics, true deletions, and complicated schedule exceptions require separate review.
+
+## Full Monthly List
+
+The response SQL only touches mics that have collected replies or AI results.
+
+To classify every row in the current monthly export, including `no_response` and `not_sent`:
+
+```bash
+python prepare_monthly_verification_updates.py /path/to/current_export.csv
+```
+
+Dry-run the Supabase CSV updater:
+
+```bash
+python update_monthly_verification_supabase.py august_supabase_updates.csv
+```
+
+Apply after review:
+
+```bash
+python update_monthly_verification_supabase.py august_supabase_updates.csv --apply
+```
+
+## Same Round Vs New Round
+
+For more replies from the same DM round, keep using:
+
+- `ig_sent_messages.json`
+- `ig_mic_mapping.json`
+- `dm_replies.json`
+
+Use missing-only collection for later passes:
+
+```bash
+python collect_instagram_responses.py --missing-only --amount 300
+```
+
+Before a new monthly round, archive current artifacts:
+
+```bash
+mkdir -p response_runs/aug_2026_after_push
+cp dm_replies.json processed_responses.json ai_parse_queue.json ai_parse_results.json supabase_response_updates.sql ig_sent_messages.json ig_mic_mapping.json response_runs/aug_2026_after_push/
+```
+
+Then send the next batch.
+
+## SMS Workflow
+
+SMS still follows the older send/collect/process pattern:
+
+```bash
+python send_sms_messages.py /path/to/current_mics.csv
+python collect_sms_responses.py
+python process_responses.py
+```
+
+SMS responses are read from `twilio_responses.json` when present.
+
+## Troubleshooting
+
+### `No module named 'instagrapi'`
+
+Activate the venv:
+
+```bash
+source venv/bin/activate
+```
+
+### Instagram `login_required`
+
+Log into Instagram in a browser/app, clear any security challenge, then rerun collection.
+
+### Missed Replies
+
+Use:
+
+```bash
+python collect_instagram_responses.py --missing-only --dry-run
+python collect_instagram_responses.py --missing-only --amount 300
+```
+
+Or target one handle:
+
+```bash
+python collect_instagram_responses.py --username handle --amount 300
+```
+
+### Supabase `text = uuid` Error
+
+Regenerate SQL with the current processor:
+
+```bash
+python process_responses.py
+```
+
+The current SQL compares `unique_identifier` as text.
+
+## Security
+
+- Keep credentials in `.env`.
+- Do not commit generated response artifacts.
+- `dump.json`, `*.json`, `*.csv`, generated SQL, and response archives are ignored by `.gitignore`.
