@@ -19,6 +19,10 @@ IG_USER=your_instagram_username
 IG_PASSWORD=your_instagram_password
 CHANGES_FORM_LINK=https://your-form-link.com
 
+# Optional Instagram public-post comment collection
+IG_GRAPH_ACCESS_TOKEN=your_instagram_graph_api_token
+IG_GRAPH_API_VERSION=v23.0
+
 # Optional SMS/Twilio
 TWILIO_ACCOUNT_SID=your_account_sid
 TWILIO_AUTH_TOKEN=your_auth_token
@@ -97,6 +101,35 @@ If `ai_parse_queue.json` has items, parse/edit `ai_parse_results.json`, then rer
 python process_responses.py
 ```
 
+## Instagram Draft Comments
+
+For public draft-list posts, generate stable comment codes:
+
+```bash
+python prepare_instagram_draft_mapping.py /path/to/current_mics.csv
+```
+
+This writes:
+
+- `instagram_draft_mic_mapping.json`: code/username to mic ID mapping
+- `instagram_draft_list.csv`: posting source with a `draft_code` column
+
+Publish the draft codes next to each mic and ask hosts to comment with the code:
+
+```text
+OMABC123 now starts at 8 PM
+```
+
+After the post is live, collect comments from the Instagram Graph API media ID:
+
+```bash
+python collect_instagram_comments.py --media-id YOUR_MEDIA_ID
+```
+
+This writes `ig_comment_responses.json`, then reruns `process_responses.py`.
+Clear `Y`/`N` comments can become direct SQL updates; corrections go into
+`ai_parse_queue.json` for parsing/review.
+
 ## Supabase Update
 
 Review generated SQL:
@@ -110,6 +143,13 @@ grep -n "responded_unclear" supabase_response_updates.sql
 Then run `supabase_response_updates.sql` in the Supabase SQL editor.
 
 The SQL updates existing rows only. Add brand-new mics separately.
+
+Or use the Supabase API apply helper:
+
+```bash
+python apply_response_updates.py
+python apply_response_updates.py --apply
+```
 
 ## Status Values
 

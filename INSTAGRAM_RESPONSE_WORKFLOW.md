@@ -26,6 +26,17 @@ CHANGES_FORM_LINK=https://your-form-link.com
 
 `dump.json` stores the Instagram session. Keep it unless Instagram login starts failing.
 
+For public draft-post comment collection, use the Instagram Graph API instead of
+password login. Add:
+
+```env
+IG_GRAPH_ACCESS_TOKEN=your_instagram_graph_api_token
+IG_GRAPH_API_VERSION=v23.0
+```
+
+The token must be able to read comments for the Instagram professional account
+that owns the draft-list media.
+
 ## 2. Send DMs
 
 Send a new verification batch from a CSV with `open_mic`, `changes_updates`, and `unique_identifier`:
@@ -62,6 +73,43 @@ python collect_instagram_responses.py --missing-only --amount 300
 python collect_instagram_responses.py --username paulzachcomedy --amount 300
 ```
 
+## 3b. Public Draft Comment Flow
+
+If you want to post a draft open-mics list publicly and let hosts comment
+corrections, first generate draft comment codes from the same CSV/export:
+
+```bash
+python prepare_instagram_draft_mapping.py /path/to/current_mics.csv
+```
+
+This creates:
+
+- `instagram_draft_mic_mapping.json`: public code and username fallback mapping
+- `instagram_draft_list.csv`: a posting source with `draft_code` next to each mic
+
+Include the `draft_code` in the public draft list and ask hosts to comment with
+it, for example:
+
+```text
+OMABC123 now starts at 8 PM
+OMDEF456 N
+```
+
+After publishing, collect comments from the Instagram Graph API media ID:
+
+```bash
+python collect_instagram_comments.py --media-id YOUR_MEDIA_ID
+```
+
+The collector writes `ig_comment_responses.json` and automatically reruns
+`process_responses.py`. Clear comments such as `OMDEF456 N` produce direct SQL
+updates. Update-like or unclear comments go into `ai_parse_queue.json`, with the
+matched mic context, before any SQL is generated from AI results.
+
+By default, `collect_instagram_comments.py` processes comments only, so stale DM
+or SMS artifacts are not mixed into the comment run. Add
+`--include-existing-response-files` if you intentionally want one combined run.
+
 ## 4. Processing Outputs
 
 After collection or after manually rerunning:
@@ -82,6 +130,7 @@ The direct parser only maps clear responses directly:
 
 - `Y`, `Yes`, numbered `1 Y` -> direct confirmed update
 - `N`, numbered `1 N` -> direct confirmed inactive update
+- comment-code variants such as `OMABC123 Y` or `OMABC123 N`
 - update-like text such as "now starts at 7:15", "every other Wednesday", "sign up required" -> AI queue
 
 AI queue items include `message_history`, newest first, so follow-up messages can be interpreted with earlier formatted replies.
@@ -171,6 +220,13 @@ grep -n "needs" ai_parse_results.json
 ```
 
 Then run `supabase_response_updates.sql` in the Supabase SQL editor.
+
+Or dry-run/apply through the Supabase API:
+
+```bash
+python apply_response_updates.py
+python apply_response_updates.py --apply
+```
 
 The generated SQL updates existing rows by text `unique_identifier`; it does not insert brand-new mics. Handle new mic additions separately.
 

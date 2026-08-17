@@ -38,6 +38,10 @@ TWILIO_PHONE_NUMBER=+1234567890
 
 # Optional link included in Instagram messages
 CHANGES_FORM_LINK=https://your-form-link.com
+
+# Optional public draft-post comment collection
+IG_GRAPH_ACCESS_TOKEN=your_instagram_graph_api_token
+IG_GRAPH_API_VERSION=v23.0
 ```
 
 `dump.json` stores the Instagram session after login. Keep it unless Instagram login starts failing.
@@ -64,7 +68,10 @@ SMS scripts use `sms_response` for phone numbers.
 |---|---|
 | `send_instagram_messages.py` | Send grouped Instagram DMs by valid handle |
 | `collect_instagram_responses.py` | Collect Instagram replies and automatically process outputs |
+| `prepare_instagram_draft_mapping.py` | Generate public draft codes and mic mappings for comment correction posts |
+| `collect_instagram_comments.py` | Collect comments from a draft Instagram post and automatically process outputs |
 | `process_responses.py` | Build direct updates, AI queue, AI-result mapping, and SQL |
+| `apply_response_updates.py` | Dry-run/apply processed direct and reviewed AI updates to Supabase |
 | `prepare_monthly_verification_updates.py` | Build full-list monthly status CSVs |
 | `update_monthly_verification_supabase.py` | Dry-run/apply full-list monthly CSV updates |
 | `send_sms_messages.py` | Send grouped SMS messages |
@@ -116,6 +123,31 @@ python collect_instagram_responses.py --username paulzachcomedy --amount 300
 ```
 
 Collection writes `dm_replies.json` and automatically runs `process_responses.py`.
+
+## Collecting Public Draft Comments
+
+To release a public draft list and let hosts comment corrections, generate
+stable draft codes:
+
+```bash
+python prepare_instagram_draft_mapping.py /path/to/current_mics.csv
+```
+
+This creates `instagram_draft_mic_mapping.json` and `instagram_draft_list.csv`.
+Publish the `draft_code` next to each mic and ask hosts to include it in
+comments, such as `OMABC123 starts at 8 PM`.
+
+After the post is live, collect comments by media ID:
+
+```bash
+python collect_instagram_comments.py --media-id YOUR_MEDIA_ID
+```
+
+Comments are written to `ig_comment_responses.json` and processed into the same
+`ai_parse_queue.json` and `supabase_response_updates.sql` workflow as DMs/SMS.
+The collector uses the Instagram Graph API token in `IG_GRAPH_ACCESS_TOKEN`.
+Comment collection processes comments only by default; add
+`--include-existing-response-files` to combine with current DM/SMS artifacts.
 
 ## Processing Outputs
 
@@ -237,6 +269,13 @@ grep -n "responded_unclear" supabase_response_updates.sql
 ```
 
 Then run `supabase_response_updates.sql` in the Supabase SQL editor.
+
+Or dry-run/apply the same processed response payloads through the Supabase API:
+
+```bash
+python apply_response_updates.py
+python apply_response_updates.py --apply
+```
 
 Notes:
 

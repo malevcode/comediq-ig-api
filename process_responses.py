@@ -21,6 +21,8 @@ DEFAULT_AI_QUEUE_FILE = "ai_parse_queue.json"
 DEFAULT_AI_RESULTS_FILE = "ai_parse_results.json"
 DEFAULT_AI_RESULTS_TEMPLATE_FILE = "ai_parse_results_template.json"
 DEFAULT_SQL_OUTPUT_FILE = "supabase_response_updates.sql"
+DEFAULT_COMMENT_RESPONSES_FILE = "ig_comment_responses.json"
+DEFAULT_COMMENT_MAPPING_FILE = "instagram_draft_mic_mapping.json"
 
 AI_UPDATE_FIELDS = {
     "active",
@@ -68,6 +70,8 @@ def load_instagram_responses(file_path: str = "dm_replies.json") -> Dict[str, An
     Returns:
         Dictionary of responses
     """
+    if not file_path:
+        return {}
     if not os.path.exists(file_path):
         print(f"⚠️  Instagram responses file not found: {file_path}")
         return {}
@@ -90,6 +94,8 @@ def load_sms_responses(file_path: str = "twilio_responses.json") -> Dict[str, An
     Returns:
         Dictionary of responses
     """
+    if not file_path:
+        return {}
     if not os.path.exists(file_path):
         print(f"⚠️  SMS responses file not found: {file_path}")
         return {}
@@ -100,6 +106,137 @@ def load_sms_responses(file_path: str = "twilio_responses.json") -> Dict[str, An
     except Exception as e:
         print(f"❌ Error loading SMS responses: {e}")
         return {}
+
+
+def load_comment_responses(file_path: str = DEFAULT_COMMENT_RESPONSES_FILE) -> Dict[str, Any]:
+    """Load Instagram post comments collected through the Instagram Graph API."""
+    if not file_path:
+        return {}
+    if not os.path.exists(file_path):
+        return {}
+
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"⚠️  Error loading Instagram comments: {e}")
+        return {}
+
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        return {"comments": data}
+    return {}
+
+
+def normalize_public_code(value: Any) -> str:
+    """Normalize a draft-list public mic code for matching in comments."""
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def normalize_instagram_username(value: Any) -> str:
+    """Normalize an Instagram username without @."""
+    return str(value or "").strip().lstrip("@").lower()
+
+
+def load_comment_mic_mapping(file_path: str = DEFAULT_COMMENT_MAPPING_FILE) -> Dict[str, Any]:
+    """Load draft code and username mapping generated for public comment collection."""
+    if not os.path.exists(file_path):
+        return {"codes": {}, "usernames": {}, "mics": {}}
+
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"⚠️  Error loading comment mic mapping: {e}")
+        return {"codes": {}, "usernames": {}, "mics": {}}
+
+    codes = {}
+    for code, mic_ids in (data.get("codes") or {}).items():
+        normalized = normalize_public_code(code)
+        if not normalized:
+            continue
+        if not isinstance(mic_ids, list):
+            mic_ids = [mic_ids]
+        codes[normalized] = [str(mic_id) for mic_id in mic_ids if mic_id]
+
+    usernames = {}
+    for username, mic_ids in (data.get("usernames") or {}).items():
+        normalized = normalize_instagram_username(username)
+        if not normalized:
+            continue
+        if not isinstance(mic_ids, list):
+            mic_ids = [mic_ids]
+        usernames[normalized] = [str(mic_id) for mic_id in mic_ids if mic_id]
+
+    return {
+        "codes": codes,
+        "usernames": usernames,
+        "mics": data.get("mics") or {},
+        "metadata": data.get("metadata") or {},
+    }
+
+
+def extract_comment_codes(text: str, code_mapping: Dict[str, List[str]]) -> List[str]:
+    """Find public draft codes in a comment without substring false positives."""
+    if not text or not code_mapping:
+        return []
+
+    matches = []
+    for code in code_mapping:
+        pattern = re.compile(rf"(?<![A-Z0-9])#?{re.escape(code)}(?![A-Z0-9])", re.IGNORECASE)
+        if pattern.search(text):
+            matches.append(code)
+    return matches
+
+
+def strip_comment_codes(text: str, codes: List[str]) -> str:
+    """Remove matched public draft codes before deterministic Y/N parsing."""
+    stripped = str(text or "")
+    for code in codes:
+        stripped = re.sub(rf"(?<![A-Z0-9])#?{re.escape(code)}(?![A-Z0-9])", " ", stripped, flags=re.IGNORECASE)
+    return " ".join(stripped.split())
+
+
+def normalize_comment_items(comment_responses: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Flatten top-level comments and replies into newest-first comment records."""
+    comments = comment_responses.get("comments", [])
+    if isinstance(comments, dict):
+        comments = comments.get("data", [])
+    if not isinstance(comments, list):
+        comments = []
+
+    flattened = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        base = {
+            "id": comment.get("id", ""),
+            "username": comment.get("username", ""),
+            "text": comment.get("text") or comment.get("message") or "",
+            "timestamp": comment.get("timestamp") or comment.get("created_time") or "",
+            "parent_id": comment.get("parent_id") or None,
+            "permalink": comment.get("permalink") or "",
+        }
+        flattened.append(base)
+
+        replies = comment.get("replies", [])
+        if isinstance(replies, dict):
+            replies = replies.get("data", [])
+        if isinstance(replies, list):
+            for reply in replies:
+                if not isinstance(reply, dict):
+                    continue
+                flattened.append({
+                    "id": reply.get("id", ""),
+                    "username": reply.get("username", ""),
+                    "text": reply.get("text") or reply.get("message") or "",
+                    "timestamp": reply.get("timestamp") or reply.get("created_time") or "",
+                    "parent_id": comment.get("id", ""),
+                    "permalink": reply.get("permalink") or comment.get("permalink") or "",
+                })
+
+    return sorted(flattened, key=lambda item: item.get("timestamp") or "", reverse=True)
 
 
 def load_ai_results(file_path: str = DEFAULT_AI_RESULTS_FILE) -> List[Dict[str, Any]]:
@@ -417,7 +554,181 @@ def convert_yn_to_boolean(response: Any) -> Any:
         return None
 
 
-def organize_responses(ig_responses: Dict, sms_responses: Dict, 
+def organize_comment_responses(
+    comment_responses: Dict[str, Any],
+    comment_mapping: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Turn draft-post comments into the same mic-level records used by DM/SMS replies."""
+    mic_responses = {}
+    contact_responses = []
+    direct_supabase_updates = []
+    ai_parse_queue = []
+
+    code_mapping = comment_mapping.get("codes") or {}
+    username_mapping = comment_mapping.get("usernames") or {}
+    mic_metadata = comment_mapping.get("mics") or {}
+
+    for comment in normalize_comment_items(comment_responses):
+        text = comment.get("text", "")
+        username = normalize_instagram_username(comment.get("username"))
+        timestamp = comment.get("timestamp", "")
+        comment_id = str(comment.get("id") or "")
+        matched_codes = extract_comment_codes(text, code_mapping)
+
+        mic_ids = []
+        match_method = None
+        if matched_codes:
+            for code in matched_codes:
+                mic_ids.extend(code_mapping.get(code, []))
+            match_method = "draft_code"
+        elif username and username in username_mapping:
+            mic_ids = username_mapping[username]
+            match_method = "instagram_username"
+
+        # Preserve order while removing duplicates.
+        mic_ids = list(dict.fromkeys(str(mic_id) for mic_id in mic_ids if mic_id))
+        parse_text = strip_comment_codes(text, matched_codes)
+        parsed_status = parse_structured_response(parse_text)
+        numbered_responses = parse_structured_numbered_responses(parse_text)
+        message_history = normalize_message_history([{
+            "message": text,
+            "timestamp": timestamp,
+            "comment_id": comment_id,
+            "username": username,
+        }])
+
+        contact_info = f"ig_comment:{comment_id or username or 'unknown'}"
+        contact_response = {
+            "contact_method": "instagram_comment",
+            "contact_info": contact_info,
+            "username": username,
+            "comment_id": comment_id,
+            "parent_id": comment.get("parent_id"),
+            "permalink": comment.get("permalink"),
+            "matched_codes": matched_codes,
+            "match_method": match_method,
+            "mic_identifiers": mic_ids,
+            "response_type": parsed_status,
+            "raw_message": text,
+            "timestamp": timestamp,
+            "recognition_status": "recognized" if parsed_status and mic_ids else "unrecognized",
+            "message_history": message_history,
+        }
+        contact_responses.append(contact_response)
+
+        if not mic_ids:
+            queue_id = make_queue_id("instagram_comment", contact_info, timestamp, "unmatched")
+            ai_parse_queue.append({
+                "queue_id": queue_id,
+                "source": "instagram_comment",
+                "contact_info": contact_info,
+                "username": username,
+                "comment_id": comment_id,
+                "mic_identifier": None,
+                "all_mic_identifiers_for_contact": [],
+                "raw_message": text,
+                "timestamp": timestamp,
+                "message_history": message_history,
+                "deterministic_status": parsed_status,
+                "reason": "comment_did_not_match_draft_code_or_known_username",
+                "expected_ai_result_shape": {
+                    "queue_id": queue_id,
+                    "mic_identifier": "fill_with_existing_unique_identifier",
+                    "active": True,
+                    "verification_status": "responded_changes",
+                    "updates": {},
+                    "confidence": 0.0,
+                    "needs_human_review": True,
+                    "notes": "Comment did not include a known draft code and username fallback was unavailable."
+                }
+            })
+            continue
+
+        for position, mic_id in enumerate(mic_ids, 1):
+            status = None
+            if numbered_responses:
+                numbered_status = numbered_responses.get(position) or numbered_responses.get(str(position))
+                status = convert_yn_to_boolean(numbered_status)
+            elif parsed_status:
+                status = convert_yn_to_boolean(parsed_status)
+
+            mic_record = {
+                "mic_identifier": mic_id,
+                "status": status,
+                "contact_method": "instagram_comment",
+                "contact_info": contact_info,
+                "position_in_message": position,
+                "raw_message": text,
+                "timestamp": timestamp,
+                "recognition_status": "recognized" if status in (True, False) else "unrecognized",
+                "message_history": message_history,
+            }
+
+            if status in (True, False):
+                mic_responses[mic_id] = mic_record
+                direct_supabase_updates.append(mic_record)
+            elif text:
+                queue_id = make_queue_id("instagram_comment", contact_info, timestamp, str(mic_id))
+                ai_parse_queue.append({
+                    "queue_id": queue_id,
+                    "source": "instagram_comment",
+                    "contact_info": contact_info,
+                    "username": username,
+                    "comment_id": comment_id,
+                    "parent_id": comment.get("parent_id"),
+                    "permalink": comment.get("permalink"),
+                    "mic_identifier": mic_id,
+                    "position_in_message": position,
+                    "matched_codes": matched_codes,
+                    "match_method": match_method,
+                    "all_mic_identifiers_for_contact": mic_ids,
+                    "mic_context": mic_metadata.get(str(mic_id), {}),
+                    "raw_message": text,
+                    "timestamp": timestamp,
+                    "message_history": message_history,
+                    "deterministic_status": parsed_status,
+                    "reason": "comment_changes_or_unclear_response",
+                    "expected_ai_result_shape": {
+                        "queue_id": queue_id,
+                        "mic_identifier": mic_id,
+                        "active": True,
+                        "verification_status": "responded_changes",
+                        "updates": {
+                            "start_time": "8:00 PM"
+                        },
+                        "confidence": 0.0,
+                        "needs_human_review": True,
+                        "notes": ""
+                    }
+                })
+
+    return {
+        "mic_responses": mic_responses,
+        "contact_responses": contact_responses,
+        "direct_supabase_updates": direct_supabase_updates,
+        "ai_parse_queue": ai_parse_queue,
+    }
+
+
+def merge_organized_responses(*organized_sources: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge organized response source dictionaries."""
+    merged = {
+        "mic_responses": {},
+        "contact_responses": [],
+        "direct_supabase_updates": [],
+        "ai_parse_queue": [],
+    }
+    for source in organized_sources:
+        if not source:
+            continue
+        merged["mic_responses"].update(source.get("mic_responses") or {})
+        merged["contact_responses"].extend(source.get("contact_responses") or [])
+        merged["direct_supabase_updates"].extend(source.get("direct_supabase_updates") or [])
+        merged["ai_parse_queue"].extend(source.get("ai_parse_queue") or [])
+    return merged
+
+
+def organize_responses(ig_responses: Dict, sms_responses: Dict,
                        ig_sent: Dict, sms_sent: Dict) -> Dict[str, Any]:
     """
     Organize all responses into individual mic status entries.
@@ -667,7 +978,9 @@ def generate_supabase_sql(
             continue
 
         queue_item = queue_by_id.get(result.get("queue_id"))
-        mic_id = queue_item.get("mic_identifier") if queue_item else result.get("mic_identifier")
+        mic_id = result.get("mic_identifier")
+        if not mic_id and queue_item:
+            mic_id = queue_item.get("mic_identifier")
         if not mic_id:
             continue
 
@@ -743,6 +1056,8 @@ def save_ai_results_template(ai_parse_queue: List[Dict[str, Any]], output_file: 
 def process_response_files(
     instagram_file: str = "dm_replies.json",
     sms_file: str = "twilio_responses.json",
+    comments_file: str = DEFAULT_COMMENT_RESPONSES_FILE,
+    comment_mapping_file: str = DEFAULT_COMMENT_MAPPING_FILE,
     output_file: str = "processed_responses.json",
     ai_queue_file: str = DEFAULT_AI_QUEUE_FILE,
     ai_results_file: str = DEFAULT_AI_RESULTS_FILE,
@@ -755,10 +1070,14 @@ def process_response_files(
     """Run the full response processing pipeline and write JSON/SQL outputs."""
     ig_responses = load_instagram_responses(instagram_file)
     sms_responses = load_sms_responses(sms_file)
+    comment_responses = load_comment_responses(comments_file)
+    comment_mapping = load_comment_mic_mapping(comment_mapping_file)
     sent_messages = load_sent_messages()
     ig_sent = {k[3:]: v for k, v in sent_messages.items() if k.startswith('ig_')}
     sms_sent = {k[4:]: v for k, v in sent_messages.items() if k.startswith('sms_')}
-    organized_data = organize_responses(ig_responses, sms_responses, ig_sent, sms_sent)
+    dm_sms_data = organize_responses(ig_responses, sms_responses, ig_sent, sms_sent)
+    comment_data = organize_comment_responses(comment_responses, comment_mapping)
+    organized_data = merge_organized_responses(dm_sms_data, comment_data)
     summary = generate_summary(organized_data)
     ai_results = load_ai_results(ai_results_file)
 
@@ -769,6 +1088,8 @@ def process_response_files(
             'ai_queue_file': ai_queue_file,
             'ai_results_file': ai_results_file,
             'sql_output_file': sql_output_file,
+            'comments_file': comments_file,
+            'comment_mapping_file': comment_mapping_file,
         },
         'mic_responses': organized_data['mic_responses'],
         'contact_responses': organized_data['contact_responses'],
@@ -820,6 +1141,7 @@ def process_response_files(
     return {
         "ig_responses": len(ig_responses),
         "sms_responses": len(sms_responses),
+        "comment_responses": len(normalize_comment_items(comment_responses)),
         "summary": summary,
         "direct_updates": len(organized_data['direct_supabase_updates']),
         "ai_queue_items": len(organized_data['ai_parse_queue']),
@@ -866,7 +1188,7 @@ def generate_summary(organized_data: Dict[str, Any]) -> Dict[str, Any]:
                 mic_status_counts['unknown'] += 1
     
     # Count contact-level statistics
-    by_method = {'instagram': 0, 'sms': 0}
+    by_method = {'instagram': 0, 'sms': 0, 'instagram_comment': 0}
     by_recognition = {'recognized': 0, 'unrecognized': 0, 'error': 0}
     
     for response in contact_responses:
@@ -895,6 +1217,8 @@ def main():
     parser = argparse.ArgumentParser(description="Process collected Instagram/SMS replies")
     parser.add_argument("--instagram-file", default="dm_replies.json")
     parser.add_argument("--sms-file", default="twilio_responses.json")
+    parser.add_argument("--comments-file", default=DEFAULT_COMMENT_RESPONSES_FILE)
+    parser.add_argument("--comment-mapping-file", default=DEFAULT_COMMENT_MAPPING_FILE)
     parser.add_argument("--output-file", default="processed_responses.json")
     parser.add_argument("--ai-queue-file", default=DEFAULT_AI_QUEUE_FILE)
     parser.add_argument("--ai-results-file", default=DEFAULT_AI_RESULTS_FILE)
@@ -913,6 +1237,8 @@ def main():
     result = process_response_files(
         instagram_file=args.instagram_file,
         sms_file=args.sms_file,
+        comments_file=args.comments_file,
+        comment_mapping_file=args.comment_mapping_file,
         output_file=args.output_file,
         ai_queue_file=args.ai_queue_file,
         ai_results_file=args.ai_results_file,
@@ -926,11 +1252,13 @@ def main():
 
     print(f"   Instagram responses: {result['ig_responses']}")
     print(f"   SMS responses: {result['sms_responses']}")
+    print(f"   Instagram comment responses: {result['comment_responses']}")
 
-    if result["ig_responses"] == 0 and result["sms_responses"] == 0:
+    if result["ig_responses"] == 0 and result["sms_responses"] == 0 and result["comment_responses"] == 0:
         print("\n⚠️  No responses found. Please run collection scripts first:")
         print("   - python collect_instagram_responses.py")
         print("   - python collect_sms_responses.py")
+        print("   - python collect_instagram_comments.py --media-id YOUR_MEDIA_ID")
         return
     
     # Print summary
@@ -949,6 +1277,7 @@ def main():
     print("\nBy contact method:")
     print(f"   📱 Instagram: {summary['by_contact_method']['instagram']}")
     print(f"   💬 SMS: {summary['by_contact_method']['sms']}")
+    print(f"   💬 Instagram comments: {summary['by_contact_method'].get('instagram_comment', 0)}")
     print("\nOutputs:")
     print(f"   Direct Supabase updates: {result['direct_updates']}")
     print(f"   AI parse queue items: {result['ai_queue_items']}")
@@ -961,7 +1290,7 @@ def main():
     
     print("\n💡 Next steps:")
     print("   1. Review supabase_response_updates.sql for direct Y/N updates.")
-    print("   2. Send ai_parse_queue.json to AI for unclear/change replies.")
+    print("   2. Send ai_parse_queue.json to AI for unclear/change replies, including comments.")
     print("   3. Save AI output as ai_parse_results.json, then rerun this script.")
     print("   4. Review the regenerated SQL before running it in Supabase.")
 

@@ -249,6 +249,16 @@ def main():
         action="store_true",
         help="Include no_response/not_sent rows in the Supabase output as status-only updates.",
     )
+    parser.add_argument(
+        "--only-empty-status",
+        action="store_true",
+        help="Only include source rows where the status column is currently empty.",
+    )
+    parser.add_argument(
+        "--status-only",
+        action="store_true",
+        help="Limit the Supabase output to unique_identifier and the status column.",
+    )
     args = parser.parse_args()
 
     source = pd.read_csv(args.source_csv, dtype=str, keep_default_na=False)
@@ -269,6 +279,8 @@ def main():
     rows: List[Dict[str, Any]] = []
     for _, row in source.iterrows():
         mic_id = str(row["unique_identifier"])
+        existing_status = str(row.get(args.status_column, "")).strip().lower()
+        source_status_is_empty = existing_status in {"", "nan", "none", "null"}
         response = response_by_mic_id.get(mic_id)
 
         if response:
@@ -277,7 +289,7 @@ def main():
             raw_response = response.get("raw_message", "")
             response_contact = response.get("contact", "")
             field_updates = response.get("field_updates", {})
-        elif mic_id in sent_mic_ids or has_valid_instagram_handle(row.get("changes_updates", "")):
+        elif mic_id in sent_mic_ids:
             status = "no_response"
             last_verified = row.get("last_verified", "")
             raw_response = ""
@@ -301,7 +313,8 @@ def main():
             if field in output_row and value:
                 output_row[field] = value
 
-        rows.append(output_row)
+        if not args.only_empty_status or source_status_is_empty:
+            rows.append(output_row)
 
     google_df = pd.DataFrame(rows)
     google_df.to_csv(args.google_output, index=False)
@@ -313,17 +326,20 @@ def main():
             google_df[args.status_column].isin(VALID_STATUS_VALUES)
         ].copy()
 
-    supabase_columns = [
-        "unique_identifier",
-        "last_verified",
-        args.status_column,
-        "cost",
-        "frequency",
-        "location",
-        "stage_time",
-        "latest_end_time",
-        raw_response_col,
-    ]
+    if args.status_only:
+        supabase_columns = ["unique_identifier", args.status_column]
+    else:
+        supabase_columns = [
+            "unique_identifier",
+            "last_verified",
+            args.status_column,
+            "cost",
+            "frequency",
+            "location",
+            "stage_time",
+            "latest_end_time",
+            raw_response_col,
+        ]
     existing_supabase_columns = [col for col in supabase_columns if col in supabase_df.columns]
     supabase_df[existing_supabase_columns].to_csv(args.supabase_output, index=False)
 
