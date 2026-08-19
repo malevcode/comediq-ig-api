@@ -5,7 +5,6 @@ Collect responses from Instagram DMs and save them for processing.
 This script fetches DM replies from Instagram and saves them in a structured format.
 """
 
-from ig_messaging import InstagramMessagingSystem
 from process_responses import process_response_files
 import argparse
 import json
@@ -92,6 +91,8 @@ def main():
     
     # Initialize messaging system
     try:
+        from ig_messaging import InstagramMessagingSystem
+
         print("\n🔐 Logging into Instagram...")
         messaging_system = InstagramMessagingSystem(sent_messages_file, mic_mapping_file)
     except Exception as e:
@@ -121,7 +122,9 @@ def main():
 
     print("\n🔄 Processing responses into direct updates, AI queue, and SQL...")
     try:
-        result = process_response_files()
+        result = process_response_files(
+            comments_file="",
+        )
         print(f"✅ Direct Supabase updates: {result['direct_updates']}")
         print(f"🧠 AI parse queue items: {result['ai_queue_items']}")
         print(f"📄 Processed JSON: {result['output_file']}")

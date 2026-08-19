@@ -1,0 +1,161 @@
+name: Send Monthly Mic Verification DMs
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_path:
+        description: "Optional CSV path in this repository. Leave blank to export active mics from Supabase."
+        required: false
+        default: ""
+        type: string
+      source:
+        description: "Source mode: supabase or csv"
+        required: false
+        default: "supabase"
+        type: string
+      table:
+        description: "Supabase table to export when source is supabase"
+        required: false
+        default: "open_mics_historical"
+        type: string
+      active_only:
+        description: "Only export active mics from Supabase"
+        required: false
+        default: true
+        type: boolean
+      dry_run:
+        description: "Build and preview batches without sending Instagram DMs"
+        required: false
+        default: true
+        type: boolean
+      batch_size:
+        description: "Instagram accounts per batch"
+        required: false
+        default: "50"
+        type: string
+      message_delay_min:
+        description: "Minimum delay between individual DMs, in seconds"
+        required: false
+        default: "5"
+        type: string
+      message_delay_max:
+        description: "Maximum delay between individual DMs, in seconds"
+        required: false
+        default: "15"
+        type: string
+      batch_delay_min:
+        description: "Minimum delay between batches, in minutes"
+        required: false
+        default: "30"
+        type: string
+      batch_delay_max:
+        description: "Maximum delay between batches, in minutes"
+        required: false
+        default: "60"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: instagram-monthly-verification-send
+  cancel-in-progress: false
+
+jobs:
+  send-dms:
+    name: Build batches and send DMs
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      IG_USER: ${{ secrets.IG_USER }}
+      IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
+      CHANGES_FORM_LINK: ${{ secrets.CHANGES_FORM_LINK }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install workflow dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-dotenv pandas instagrapi supabase
+
+      - name: Resolve source CSV
+        id: source-csv
+        run: |
+          if [ -n "${{ inputs.csv_path }}" ]; then
+            case "${{ inputs.csv_path }}" in
+              admin_uploads/monthly-mic-verification/*.csv) ;;
+              *) echo "csv_path must be under admin_uploads/monthly-mic-verification/*.csv" && exit 1 ;;
+            esac
+            test -f "${{ inputs.csv_path }}" || (echo "CSV not found: ${{ inputs.csv_path }}" && exit 1)
+            echo "csv_path=${{ inputs.csv_path }}" >> "$GITHUB_OUTPUT"
+          else
+            test "${{ inputs.source }}" = "supabase" || (echo "csv_path is required when source is not supabase" && exit 1)
+            test "${{ inputs.active_only }}" = "true" || (echo "Only active_only=true is supported for Supabase exports" && exit 1)
+            test -n "$SUPABASE_URL" || (echo "Missing SUPABASE_URL secret" && exit 1)
+            test -n "$SUPABASE_KEY" || (echo "Missing SUPABASE_KEY secret" && exit 1)
+            python export_monthly_verification_mics.py \
+              --table "${{ inputs.table }}" \
+              --output monthly_verification_mics.csv
+            echo "csv_path=monthly_verification_mics.csv" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate Instagram secrets
+        run: |
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            test -n "$IG_USER" || (echo "Missing IG_USER secret" && exit 1)
+            test -n "$IG_PASSWORD" || (echo "Missing IG_PASSWORD secret" && exit 1)
+          fi
+
+      - name: Build batch plan
+        if: ${{ inputs.dry_run }}
+        run: |
+          python send_instagram_messages.py "${{ steps.source-csv.outputs.csv_path }}" \
+            --dry-run \
+            --batch-size "${{ inputs.batch_size }}" \
+            --message-delay-min "${{ inputs.message_delay_min }}" \
+            --message-delay-max "${{ inputs.message_delay_max }}" \
+            --batch-delay-min "${{ inputs.batch_delay_min }}" \
+            --batch-delay-max "${{ inputs.batch_delay_max }}"
+
+      - name: Send Instagram DMs
+        if: ${{ !inputs.dry_run }}
+        run: |
+          python send_instagram_messages.py "${{ steps.source-csv.outputs.csv_path }}" \
+            --yes \
+            --batch-size "${{ inputs.batch_size }}" \
+            --message-delay-min "${{ inputs.message_delay_min }}" \
+            --message-delay-max "${{ inputs.message_delay_max }}" \
+            --batch-delay-min "${{ inputs.batch_delay_min }}" \
+            --batch-delay-max "${{ inputs.batch_delay_max }}"
+
+      - name: Commit send state for response collection
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ig_sent_messages.json ig_mic_mapping.json ig_batch_plan.json
+          git diff --cached --quiet || git commit -m "Update Instagram monthly verification send state"
+          git push
+
+      - name: Upload send artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-monthly-verification-send-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            ig_batch_plan.json
+            ig_sent_messages.json
+            ig_mic_mapping.json

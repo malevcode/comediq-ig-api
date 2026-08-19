@@ -7,7 +7,6 @@ a personalized message listing all mics for each host.
 """
 
 import pandas as pd
-from ig_messaging import InstagramMessagingSystem
 import sys
 import os
 from dotenv import load_dotenv
@@ -15,6 +14,9 @@ from typing import Dict, List
 from datetime import datetime
 import re
 import argparse
+import json
+import random
+import time
 
 
 def normalize_instagram_handle(value) -> str:
@@ -146,6 +148,11 @@ Please respond with updates for each mic. Thanks!"""
     return base_message + "\n\n" + mic_list_text + closing
 
 
+def chunk_items(items, chunk_size: int):
+    for i in range(0, len(items), chunk_size):
+        yield items[i:i + chunk_size]
+
+
 def main():
     """Main execution function."""
     print("=" * 70)
@@ -155,7 +162,31 @@ def main():
     parser = argparse.ArgumentParser(description="Send Instagram verification DMs")
     parser.add_argument("csv_file", nargs="?", help="CSV file containing mics to verify")
     parser.add_argument("--no-form-link", action="store_true", help="Do not include CHANGES_FORM_LINK in messages")
+    parser.add_argument("--dry-run", action="store_true", help="Build and preview batches without logging in or sending DMs")
+    parser.add_argument("--yes", action="store_true", help="Skip interactive confirmation before sending")
+    parser.add_argument("--batch-size", type=int, default=25, help="Number of Instagram accounts to message per batch")
+    parser.add_argument("--message-delay-min", type=float, default=5, help="Minimum delay between individual DMs, in seconds")
+    parser.add_argument("--message-delay-max", type=float, default=15, help="Maximum delay between individual DMs, in seconds")
+    parser.add_argument("--batch-delay-min", type=float, default=30, help="Minimum delay between batches, in minutes")
+    parser.add_argument("--batch-delay-max", type=float, default=60, help="Maximum delay between batches, in minutes")
+    parser.add_argument("--batch-plan-output", default="ig_batch_plan.json", help="Where to write the constructed batch plan")
     args = parser.parse_args()
+
+    if args.batch_size < 1:
+        print("❌ Error: --batch-size must be at least 1")
+        sys.exit(1)
+    if args.message_delay_min < 0 or args.message_delay_max < 0:
+        print("❌ Error: message delays cannot be negative")
+        sys.exit(1)
+    if args.message_delay_min > args.message_delay_max:
+        print("❌ Error: --message-delay-min cannot be greater than --message-delay-max")
+        sys.exit(1)
+    if args.batch_delay_min < 0 or args.batch_delay_max < 0:
+        print("❌ Error: batch delays cannot be negative")
+        sys.exit(1)
+    if args.batch_delay_min > args.batch_delay_max:
+        print("❌ Error: --batch-delay-min cannot be greater than --batch-delay-max")
+        sys.exit(1)
 
     # Load environment variables for form link
     load_dotenv()
@@ -210,17 +241,58 @@ def main():
         print(f"\n📝 Changes form link configured: {form_link[:50]}...")
     else:
         print("\n⚠️  No changes form link in .env (CHANGES_FORM_LINK)")
+
+    sorted_items = sorted(grouped_mics.items())
+    batches = list(chunk_items(sorted_items, args.batch_size))
+    batch_plan = []
+    for batch_index, batch in enumerate(batches, 1):
+        batch_plan.append({
+            "batch_number": batch_index,
+            "handles": [
+                {
+                    "handle": handle,
+                    "mic_identifiers": [mic.get("unique_id", "") for mic in mics],
+                    "mic_count": len(mics),
+                    "message": create_message_for_host(handle, mics, form_link),
+                }
+                for handle, mics in batch
+            ],
+        })
+
+    with open(args.batch_plan_output, "w") as f:
+        json.dump(batch_plan, f, indent=2)
+
+    print("\n📦 Batch plan")
+    print(f"   Batches: {len(batches)}")
+    print(f"   Batch size: {args.batch_size} Instagram accounts")
+    print(f"   Message delay: {args.message_delay_min:g}-{args.message_delay_max:g} seconds")
+    print(f"   Batch delay: {args.batch_delay_min:g}-{args.batch_delay_max:g} minutes")
+    print(f"   Plan file: {args.batch_plan_output}")
+
+    if batches:
+        preview_handle, preview_mics = batches[0][0]
+        print(f"\n👀 First message preview (@{preview_handle}):")
+        print("-" * 70)
+        print(create_message_for_host(preview_handle, preview_mics, form_link))
+        print("-" * 70)
+
+    if args.dry_run:
+        print("\n✅ Dry run complete. No Instagram login and no DMs sent.")
+        print("=" * 70)
+        return
     
     # Confirm before sending
-    print("\n" + "=" * 70)
-    confirm = input("Ready to send messages? (yes/no): ").strip().lower()
-    if confirm not in ['yes', 'y']:
-        print("Cancelled.")
-        sys.exit(0)
+    if not args.yes:
+        print("\n" + "=" * 70)
+        confirm = input("Ready to send messages? (yes/no): ").strip().lower()
+        if confirm not in ['yes', 'y']:
+            print("Cancelled.")
+            sys.exit(0)
     
     # Initialize messaging system
     try:
         print("\n🔐 Logging into Instagram...")
+        from ig_messaging import InstagramMessagingSystem
         messaging_system = InstagramMessagingSystem()
     except Exception as e:
         print(f"❌ Error initializing Instagram: {e}")
@@ -241,25 +313,40 @@ def main():
             )
         return True
     
-    for handle, mics in sorted(grouped_mics.items()):
-        message = create_message_for_host(handle, mics, form_link)
-        
-        try:
-            result = messaging_system.send_message_to_usernames([handle], message)
-            result_value = result.get(handle, "Error")
-            results[handle] = result_value
-            if send_succeeded(result_value):
-                existing_mic_ids = messaging_system.mic_identifier_mapping.get(handle, [])
-                if not isinstance(existing_mic_ids, list):
-                    existing_mic_ids = [existing_mic_ids] if existing_mic_ids else []
-                for mic_id in [mic['unique_id'] for mic in mics]:
-                    if mic_id and mic_id not in existing_mic_ids:
-                        existing_mic_ids.append(mic_id)
-                messaging_system.mic_identifier_mapping[handle] = existing_mic_ids
-                messaging_system.save_mic_mapping()
-        except Exception as e:
-            print(f"❌ Error sending to @{handle}: {e}")
-            results[handle] = f"Error: {str(e)}"
+    for batch_index, batch in enumerate(batches, 1):
+        print(f"\n📦 Batch {batch_index}/{len(batches)} ({len(batch)} accounts)")
+        for handle, mics in batch:
+            message = create_message_for_host(handle, mics, form_link)
+            
+            try:
+                result = messaging_system.send_message_to_usernames(
+                    [handle],
+                    message,
+                    min_delay_seconds=args.message_delay_min,
+                    max_delay_seconds=args.message_delay_max,
+                )
+                result_value = result.get(handle, "Error")
+                results[handle] = result_value
+                if send_succeeded(result_value):
+                    print(f"   ✅ @{handle} ({len(mics)} mics)")
+                    existing_mic_ids = messaging_system.mic_identifier_mapping.get(handle, [])
+                    if not isinstance(existing_mic_ids, list):
+                        existing_mic_ids = [existing_mic_ids] if existing_mic_ids else []
+                    for mic_id in [mic['unique_id'] for mic in mics]:
+                        if mic_id and mic_id not in existing_mic_ids:
+                            existing_mic_ids.append(mic_id)
+                    messaging_system.mic_identifier_mapping[handle] = existing_mic_ids
+                    messaging_system.save_mic_mapping()
+                else:
+                    print(f"   ❌ @{handle}: {result_value}")
+            except Exception as e:
+                print(f"   ❌ @{handle}: {e}")
+                results[handle] = f"Error: {str(e)}"
+
+        if batch_index < len(batches):
+            delay_minutes = random.uniform(args.batch_delay_min, args.batch_delay_max)
+            print(f"\n⏳ Waiting {delay_minutes:.1f} minutes before next batch...")
+            time.sleep(delay_minutes * 60)
     
     # Print results summary
     print("\n" + "=" * 70)

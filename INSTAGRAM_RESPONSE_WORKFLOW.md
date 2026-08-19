@@ -42,13 +42,23 @@ that owns the draft-list media.
 Send a new verification batch from a CSV with `open_mic`, `changes_updates`, and `unique_identifier`:
 
 ```bash
-python send_instagram_messages.py /path/to/current_mics.csv
+python send_instagram_messages.py /path/to/current_mics.csv --dry-run
+python send_instagram_messages.py /path/to/current_mics.csv --yes
+```
+
+The sender constructs all batches in one run, writes `ig_batch_plan.json`, waits
+5-15 seconds between individual DMs, and waits 30-60 minutes between batches by
+default. You can tune that pacing:
+
+```bash
+python send_instagram_messages.py /path/to/current_mics.csv --yes --batch-size 25 --message-delay-min 5 --message-delay-max 15 --batch-delay-min 30 --batch-delay-max 60
 ```
 
 This creates or updates:
 
 - `ig_sent_messages.json`: sent message log by Instagram handle
 - `ig_mic_mapping.json`: Instagram handle to one or more mic IDs
+- `ig_batch_plan.json`: constructed batch/message preview
 
 ## 3. Collect Responses
 
@@ -73,27 +83,23 @@ python collect_instagram_responses.py --missing-only --amount 300
 python collect_instagram_responses.py --username paulzachcomedy --amount 300
 ```
 
-## 3b. Public Draft Comment Flow
+## 3b. Public List Comment Flow
 
-If you want to post a draft open-mics list publicly and let hosts comment
-corrections, first generate draft comment codes from the same CSV/export:
+If you want to post the open-mics list publicly and let hosts comment
+corrections, first generate the internal username mapping from the same
+CSV/export:
 
 ```bash
-python prepare_instagram_draft_mapping.py /path/to/current_mics.csv
+python prepare_instagram_comment_mapping.py /path/to/current_mics.csv
 ```
 
 This creates:
 
-- `instagram_draft_mic_mapping.json`: public code and username fallback mapping
-- `instagram_draft_list.csv`: a posting source with `draft_code` next to each mic
+- `instagram_comment_mic_mapping.json`: Instagram username to mic ID mapping
+- `instagram_comment_mic_mapping_review.csv`: mapping review CSV, especially for multi-mic usernames
 
-Include the `draft_code` in the public draft list and ask hosts to comment with
-it, for example:
-
-```text
-OMABC123 now starts at 8 PM
-OMDEF456 N
-```
+No public codes are needed on the poster. Comments are mapped by the Instagram
+username that leaves the comment.
 
 After publishing, collect comments from the Instagram Graph API media ID:
 
@@ -102,9 +108,11 @@ python collect_instagram_comments.py --media-id YOUR_MEDIA_ID
 ```
 
 The collector writes `ig_comment_responses.json` and automatically reruns
-`process_responses.py`. Clear comments such as `OMDEF456 N` produce direct SQL
-updates. Update-like or unclear comments go into `ai_parse_queue.json`, with the
-matched mic context, before any SQL is generated from AI results.
+`process_responses.py`. Clear single-mic comments such as `Y`, `same`, or `N`
+produce direct SQL updates. Update-like or unclear comments go into
+`ai_parse_queue.json`, with matched mic context, before any SQL is generated
+from AI results. If one commenter username maps to multiple mics, correction
+comments are queued with candidate mics instead of being applied blindly.
 
 By default, `collect_instagram_comments.py` processes comments only, so stale DM
 or SMS artifacts are not mixed into the comment run. Add
@@ -130,7 +138,7 @@ The direct parser only maps clear responses directly:
 
 - `Y`, `Yes`, numbered `1 Y` -> direct confirmed update
 - `N`, numbered `1 N` -> direct confirmed inactive update
-- comment-code variants such as `OMABC123 Y` or `OMABC123 N`
+- username-matched comment variants such as `Y`, `same`, or `N`
 - update-like text such as "now starts at 7:15", "every other Wednesday", "sign up required" -> AI queue
 
 AI queue items include `message_history`, newest first, so follow-up messages can be interpreted with earlier formatted replies.

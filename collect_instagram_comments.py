@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Collect Instagram comments from a draft-list post and process them into SQL.
+Collect Instagram comments from an open-mic list post and process them into SQL.
 
 This uses the Instagram Graph API instead of password login. Set
-IG_GRAPH_ACCESS_TOKEN in .env, then pass the media ID for the draft post.
+IG_GRAPH_ACCESS_TOKEN in .env, then pass the media ID for the list post.
 """
 
 import argparse
@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from process_responses import (
     DEFAULT_COMMENT_MAPPING_FILE,
     DEFAULT_COMMENT_RESPONSES_FILE,
+    default_last_verified,
+    default_verification_column,
     process_response_files,
 )
 
@@ -138,10 +140,13 @@ def write_comments(path: str, media_id: str, comments: List[Dict[str, Any]]) -> 
 def main():
     load_dotenv()
 
-    parser = argparse.ArgumentParser(description="Collect Instagram draft-post comments")
-    parser.add_argument("--media-id", required=True, help="Instagram Graph API media ID for the draft post")
+    parser = argparse.ArgumentParser(description="Collect Instagram list-post comments")
+    parser.add_argument("--media-id", required=True, help="Instagram Graph API media ID for the list post")
     parser.add_argument("--output-file", default=DEFAULT_COMMENT_RESPONSES_FILE)
     parser.add_argument("--comment-mapping-file", default=DEFAULT_COMMENT_MAPPING_FILE)
+    parser.add_argument("--table-name", default="open_mics_historical")
+    parser.add_argument("--verification-column", default=default_verification_column())
+    parser.add_argument("--last-verified", default=default_last_verified())
     parser.add_argument("--graph-version", default=os.getenv("IG_GRAPH_API_VERSION", DEFAULT_GRAPH_VERSION))
     parser.add_argument("--limit", type=int, default=100, help="Comments per API page")
     parser.add_argument("--max-pages", type=int, default=25)
@@ -198,6 +203,9 @@ def main():
         sms_file="twilio_responses.json" if args.include_existing_response_files else "",
         comments_file=args.output_file,
         comment_mapping_file=args.comment_mapping_file,
+        verification_column=args.verification_column,
+        last_verified=args.last_verified,
+        table_name=args.table_name,
     )
     print(f"Direct Supabase updates: {result['direct_updates']}")
     print(f"AI parse queue items: {result['ai_queue_items']}")

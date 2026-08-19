@@ -43,13 +43,25 @@ Send grouped DMs:
 
 ```bash
 source venv/bin/activate
-python send_instagram_messages.py /path/to/current_mics.csv
+python send_instagram_messages.py /path/to/current_mics.csv --dry-run
+python send_instagram_messages.py /path/to/current_mics.csv --yes
+```
+
+By default, the sender builds all message batches, waits 5-15 seconds between
+individual DMs, and waits 30-60 minutes between batches. It also writes
+`ig_batch_plan.json` so you can inspect the constructed batches.
+
+Common tuning options:
+
+```bash
+python send_instagram_messages.py /path/to/current_mics.csv --yes --batch-size 25 --message-delay-min 5 --message-delay-max 15 --batch-delay-min 30 --batch-delay-max 60
 ```
 
 This writes:
 
 - `ig_sent_messages.json`
 - `ig_mic_mapping.json`
+- `ig_batch_plan.json`
 
 ## Collect Responses
 
@@ -101,24 +113,18 @@ If `ai_parse_queue.json` has items, parse/edit `ai_parse_results.json`, then rer
 python process_responses.py
 ```
 
-## Instagram Draft Comments
+## Instagram List Comments
 
-For public draft-list posts, generate stable comment codes:
+For public list posts, generate the internal username mapping:
 
 ```bash
-python prepare_instagram_draft_mapping.py /path/to/current_mics.csv
+python prepare_instagram_comment_mapping.py /path/to/current_mics.csv
 ```
 
 This writes:
 
-- `instagram_draft_mic_mapping.json`: code/username to mic ID mapping
-- `instagram_draft_list.csv`: posting source with a `draft_code` column
-
-Publish the draft codes next to each mic and ask hosts to comment with the code:
-
-```text
-OMABC123 now starts at 8 PM
-```
+- `instagram_comment_mic_mapping.json`: Instagram username to mic ID mapping
+- `instagram_comment_mic_mapping_review.csv`: handles to review, especially multi-mic accounts
 
 After the post is live, collect comments from the Instagram Graph API media ID:
 
@@ -128,7 +134,8 @@ python collect_instagram_comments.py --media-id YOUR_MEDIA_ID
 
 This writes `ig_comment_responses.json`, then reruns `process_responses.py`.
 Clear `Y`/`N` comments can become direct SQL updates; corrections go into
-`ai_parse_queue.json` for parsing/review.
+`ai_parse_queue.json` for parsing/review. Updates stamp the monthly verification
+status and `last_verified` the same way as DM responses.
 
 ## Supabase Update
 

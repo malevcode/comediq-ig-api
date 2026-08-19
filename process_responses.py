@@ -22,7 +22,7 @@ DEFAULT_AI_RESULTS_FILE = "ai_parse_results.json"
 DEFAULT_AI_RESULTS_TEMPLATE_FILE = "ai_parse_results_template.json"
 DEFAULT_SQL_OUTPUT_FILE = "supabase_response_updates.sql"
 DEFAULT_COMMENT_RESPONSES_FILE = "ig_comment_responses.json"
-DEFAULT_COMMENT_MAPPING_FILE = "instagram_draft_mic_mapping.json"
+DEFAULT_COMMENT_MAPPING_FILE = "instagram_comment_mic_mapping.json"
 
 AI_UPDATE_FIELDS = {
     "active",
@@ -129,36 +129,22 @@ def load_comment_responses(file_path: str = DEFAULT_COMMENT_RESPONSES_FILE) -> D
     return {}
 
 
-def normalize_public_code(value: Any) -> str:
-    """Normalize a draft-list public mic code for matching in comments."""
-    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
-
-
 def normalize_instagram_username(value: Any) -> str:
     """Normalize an Instagram username without @."""
     return str(value or "").strip().lstrip("@").lower()
 
 
 def load_comment_mic_mapping(file_path: str = DEFAULT_COMMENT_MAPPING_FILE) -> Dict[str, Any]:
-    """Load draft code and username mapping generated for public comment collection."""
+    """Load internal username-to-mic mapping generated for public comment collection."""
     if not os.path.exists(file_path):
-        return {"codes": {}, "usernames": {}, "mics": {}}
+        return {"usernames": {}, "mics": {}}
 
     try:
         with open(file_path, "r") as f:
             data = json.load(f)
     except Exception as e:
         print(f"⚠️  Error loading comment mic mapping: {e}")
-        return {"codes": {}, "usernames": {}, "mics": {}}
-
-    codes = {}
-    for code, mic_ids in (data.get("codes") or {}).items():
-        normalized = normalize_public_code(code)
-        if not normalized:
-            continue
-        if not isinstance(mic_ids, list):
-            mic_ids = [mic_ids]
-        codes[normalized] = [str(mic_id) for mic_id in mic_ids if mic_id]
+        return {"usernames": {}, "mics": {}}
 
     usernames = {}
     for username, mic_ids in (data.get("usernames") or {}).items():
@@ -170,32 +156,10 @@ def load_comment_mic_mapping(file_path: str = DEFAULT_COMMENT_MAPPING_FILE) -> D
         usernames[normalized] = [str(mic_id) for mic_id in mic_ids if mic_id]
 
     return {
-        "codes": codes,
         "usernames": usernames,
         "mics": data.get("mics") or {},
         "metadata": data.get("metadata") or {},
     }
-
-
-def extract_comment_codes(text: str, code_mapping: Dict[str, List[str]]) -> List[str]:
-    """Find public draft codes in a comment without substring false positives."""
-    if not text or not code_mapping:
-        return []
-
-    matches = []
-    for code in code_mapping:
-        pattern = re.compile(rf"(?<![A-Z0-9])#?{re.escape(code)}(?![A-Z0-9])", re.IGNORECASE)
-        if pattern.search(text):
-            matches.append(code)
-    return matches
-
-
-def strip_comment_codes(text: str, codes: List[str]) -> str:
-    """Remove matched public draft codes before deterministic Y/N parsing."""
-    stripped = str(text or "")
-    for code in codes:
-        stripped = re.sub(rf"(?<![A-Z0-9])#?{re.escape(code)}(?![A-Z0-9])", " ", stripped, flags=re.IGNORECASE)
-    return " ".join(stripped.split())
 
 
 def normalize_comment_items(comment_responses: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -564,7 +528,6 @@ def organize_comment_responses(
     direct_supabase_updates = []
     ai_parse_queue = []
 
-    code_mapping = comment_mapping.get("codes") or {}
     username_mapping = comment_mapping.get("usernames") or {}
     mic_metadata = comment_mapping.get("mics") or {}
 
@@ -573,23 +536,17 @@ def organize_comment_responses(
         username = normalize_instagram_username(comment.get("username"))
         timestamp = comment.get("timestamp", "")
         comment_id = str(comment.get("id") or "")
-        matched_codes = extract_comment_codes(text, code_mapping)
 
         mic_ids = []
         match_method = None
-        if matched_codes:
-            for code in matched_codes:
-                mic_ids.extend(code_mapping.get(code, []))
-            match_method = "draft_code"
-        elif username and username in username_mapping:
+        if username and username in username_mapping:
             mic_ids = username_mapping[username]
             match_method = "instagram_username"
 
         # Preserve order while removing duplicates.
         mic_ids = list(dict.fromkeys(str(mic_id) for mic_id in mic_ids if mic_id))
-        parse_text = strip_comment_codes(text, matched_codes)
-        parsed_status = parse_structured_response(parse_text)
-        numbered_responses = parse_structured_numbered_responses(parse_text)
+        parsed_status = parse_structured_response(text)
+        numbered_responses = parse_structured_numbered_responses(text)
         message_history = normalize_message_history([{
             "message": text,
             "timestamp": timestamp,
@@ -605,7 +562,6 @@ def organize_comment_responses(
             "comment_id": comment_id,
             "parent_id": comment.get("parent_id"),
             "permalink": comment.get("permalink"),
-            "matched_codes": matched_codes,
             "match_method": match_method,
             "mic_identifiers": mic_ids,
             "response_type": parsed_status,
@@ -630,7 +586,7 @@ def organize_comment_responses(
                 "timestamp": timestamp,
                 "message_history": message_history,
                 "deterministic_status": parsed_status,
-                "reason": "comment_did_not_match_draft_code_or_known_username",
+                "reason": "commenter_username_not_found_in_mapping",
                 "expected_ai_result_shape": {
                     "queue_id": queue_id,
                     "mic_identifier": "fill_with_existing_unique_identifier",
@@ -639,7 +595,47 @@ def organize_comment_responses(
                     "updates": {},
                     "confidence": 0.0,
                     "needs_human_review": True,
-                    "notes": "Comment did not include a known draft code and username fallback was unavailable."
+                    "notes": "Commenter username was not found in instagram_comment_mic_mapping.json."
+                }
+            })
+            continue
+
+        if len(mic_ids) > 1 and parsed_status == "C":
+            queue_id = make_queue_id("instagram_comment", contact_info, timestamp, "multi_mic")
+            ai_parse_queue.append({
+                "queue_id": queue_id,
+                "source": "instagram_comment",
+                "contact_info": contact_info,
+                "username": username,
+                "comment_id": comment_id,
+                "parent_id": comment.get("parent_id"),
+                "permalink": comment.get("permalink"),
+                "mic_identifier": None,
+                "candidate_mic_identifiers": mic_ids,
+                "candidate_mics": [
+                    mic_metadata.get(str(mic_id), {"unique_identifier": str(mic_id)})
+                    for mic_id in mic_ids
+                ],
+                "raw_message": text,
+                "timestamp": timestamp,
+                "message_history": message_history,
+                "deterministic_status": parsed_status,
+                "reason": "commenter_username_maps_to_multiple_mics",
+                "expected_ai_result_shape": {
+                    "queue_id": queue_id,
+                    "mic_updates": [
+                        {
+                            "mic_identifier": "choose_candidate_unique_identifier",
+                            "active": True,
+                            "verification_status": "responded_changes",
+                            "updates": {
+                                "start_time": "8:00 PM"
+                            },
+                            "confidence": 0.0,
+                            "needs_human_review": True,
+                            "notes": ""
+                        }
+                    ]
                 }
             })
             continue
@@ -679,7 +675,6 @@ def organize_comment_responses(
                     "permalink": comment.get("permalink"),
                     "mic_identifier": mic_id,
                     "position_in_message": position,
-                    "matched_codes": matched_codes,
                     "match_method": match_method,
                     "all_mic_identifiers_for_contact": mic_ids,
                     "mic_context": mic_metadata.get(str(mic_id), {}),

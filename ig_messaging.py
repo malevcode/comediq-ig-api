@@ -143,7 +143,13 @@ class InstagramMessagingSystem:
         except Exception as e:
             print(f"Error saving mic mapping: {e}")
     
-    def send_message_to_usernames(self, usernames: List[str], message: str) -> Dict[str, str]:
+    def send_message_to_usernames(
+        self,
+        usernames: List[str],
+        message: str,
+        min_delay_seconds: float = 5,
+        max_delay_seconds: float = 15,
+    ) -> Dict[str, str]:
         """
         Send a message to a list of usernames.
         
@@ -188,8 +194,9 @@ class InstagramMessagingSystem:
                 results[clean_username] = user_id
                 # Removed individual success message
                 
-                # Random delay between messages to avoid rate limiting
-                time.sleep(random.uniform(5, 15))
+                # Random delay between messages to avoid rate limiting.
+                if max_delay_seconds > 0:
+                    time.sleep(random.uniform(min_delay_seconds, max_delay_seconds))
                 
             except UserNotFound:
                 error_msg = f"User @{username} not found"

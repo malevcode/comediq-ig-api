@@ -68,8 +68,8 @@ SMS scripts use `sms_response` for phone numbers.
 |---|---|
 | `send_instagram_messages.py` | Send grouped Instagram DMs by valid handle |
 | `collect_instagram_responses.py` | Collect Instagram replies and automatically process outputs |
-| `prepare_instagram_draft_mapping.py` | Generate public draft codes and mic mappings for comment correction posts |
-| `collect_instagram_comments.py` | Collect comments from a draft Instagram post and automatically process outputs |
+| `prepare_instagram_comment_mapping.py` | Generate internal username-to-mic mapping for comment correction posts |
+| `collect_instagram_comments.py` | Collect comments from an Instagram list post and automatically process outputs |
 | `process_responses.py` | Build direct updates, AI queue, AI-result mapping, and SQL |
 | `apply_response_updates.py` | Dry-run/apply processed direct and reviewed AI updates to Supabase |
 | `prepare_monthly_verification_updates.py` | Build full-list monthly status CSVs |
@@ -81,13 +81,25 @@ SMS scripts use `sms_response` for phone numbers.
 
 ```bash
 source venv/bin/activate
-python send_instagram_messages.py /path/to/current_mics.csv
+python send_instagram_messages.py /path/to/current_mics.csv --dry-run
+python send_instagram_messages.py /path/to/current_mics.csv --yes
+```
+
+The sender constructs all batches up front, writes `ig_batch_plan.json`, waits
+5-15 seconds between individual DMs, and waits 30-60 minutes between batches by
+default.
+
+Tune the pacing when needed:
+
+```bash
+python send_instagram_messages.py /path/to/current_mics.csv --yes --batch-size 25 --message-delay-min 5 --message-delay-max 15 --batch-delay-min 30 --batch-delay-max 60
 ```
 
 This creates or updates:
 
 - `ig_sent_messages.json`
 - `ig_mic_mapping.json`
+- `ig_batch_plan.json`
 
 The message format asks for:
 
@@ -124,18 +136,18 @@ python collect_instagram_responses.py --username paulzachcomedy --amount 300
 
 Collection writes `dm_replies.json` and automatically runs `process_responses.py`.
 
-## Collecting Public Draft Comments
+## Collecting Public List Comments
 
-To release a public draft list and let hosts comment corrections, generate
-stable draft codes:
+To post the normal list graphic and let hosts comment corrections, first
+generate the internal username mapping from the same CSV/export:
 
 ```bash
-python prepare_instagram_draft_mapping.py /path/to/current_mics.csv
+python prepare_instagram_comment_mapping.py /path/to/current_mics.csv
 ```
 
-This creates `instagram_draft_mic_mapping.json` and `instagram_draft_list.csv`.
-Publish the `draft_code` next to each mic and ask hosts to include it in
-comments, such as `OMABC123 starts at 8 PM`.
+This creates `instagram_comment_mic_mapping.json` and
+`instagram_comment_mic_mapping_review.csv`. The poster does not need public
+codes; comments are matched by the Instagram username that left the comment.
 
 After the post is live, collect comments by media ID:
 
@@ -148,6 +160,11 @@ Comments are written to `ig_comment_responses.json` and processed into the same
 The collector uses the Instagram Graph API token in `IG_GRAPH_ACCESS_TOKEN`.
 Comment collection processes comments only by default; add
 `--include-existing-response-files` to combine with current DM/SMS artifacts.
+
+Single-mic usernames can produce direct updates. Clear confirmations update the
+monthly verification status and `last_verified` the same way DM responses do.
+Correction comments from usernames that map to multiple mics are queued with
+candidate mic context for review instead of guessing.
 
 ## Processing Outputs
 
