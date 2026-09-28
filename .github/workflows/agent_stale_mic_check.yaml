@@ -1,0 +1,52 @@
+name: Agent Stale Mic Check
+
+# Manual only for now. Run the SQL migration first, then start with a dry run.
+on:
+  workflow_dispatch:
+    inputs:
+      tracking_started:
+        description: "YYYY-MM-DD the day user check-in tracking went live"
+        required: true
+        type: string
+      apply:
+        description: "Actually hide and revive mics (leave off for a dry run)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-stale-mic-check
+  cancel-in-progress: false
+
+jobs:
+  stale-check:
+    name: Check for stale mics
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install supabase
+
+      - name: Dry run
+        if: ${{ !inputs.apply }}
+        run: python -m agent.run_stale_check --tracking-started "${{ inputs.tracking_started }}"
+
+      - name: Apply
+        if: ${{ inputs.apply }}
+        run: python -m agent.run_stale_check --tracking-started "${{ inputs.tracking_started }}" --apply
