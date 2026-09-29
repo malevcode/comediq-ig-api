@@ -124,3 +124,29 @@ Being honest about this matters more than looking finished:
 - Run the SQL migration in Supabase.
 - Make the web app write check-ins to `agent_mic_activity` and award points using the rules in `agent/points.py`.
 - Email the Monday report to Adam.
+
+### Session 2 (2026-09-29): end of month blast and making it monthly
+
+**What we decided**
+
+- Every active New York mic host gets the monthly verification DM before October 1.
+- The 23 mics that are inactive in our database but listed by Eye Candy are NOT switched back on by us. Their hosts get a DM, and a mic comes back only when the host replies Y. This is what keeps our list more trustworthy than other open mic sites.
+- Mics on the Eye Candy list that we do not have are added as hidden (inactive) rows, and go live only when the host confirms.
+- The two irreversible steps stay behind a typed word: `GO` (add the hidden mics and send the DMs) and `APPLY` (write the reply updates to the database). This is the same 3-approvals-in-a-row rule, applied to mass DMs.
+- The long term goal is a monthly pipeline that prepares the blast, asks for one tap, collects and understands replies, updates the database, hides stale mics, and saves a snapshot, so nobody does this by hand again.
+
+**What we learned about the code**
+
+- A "Y" reply from a host already switches that mic to active, even if it was inactive before. So "reactivate only when the host confirms" needs no new code.
+- The two GitHub workflows that send DMs and collect replies would push private DM replies and host handles into this public repository. They must not be run for real here. The monthly automation should live in a private copy of the repo.
+- The export script has no city filter yet, and the audit notes use different table and column names (`mics_master`, `is_active`) than the scripts (`open_mics_historical`, `active`). The first step of the run is to check the real names.
+
+**What we built**
+
+- `prompts/monthly_run_2026-09.md`: one big prompt for Claude Code. Part A does this month's blast and audit with safety rules and two gates. Part B turns it into the monthly automatic pipeline.
+
+**What is next**
+
+- Run the prompt in a terminal inside the repo.
+- Give Claude Code the CSV export and the seven Eye Candy screenshots.
+- Add `ANTHROPIC_API_KEY` to the private repo so replies can be understood automatically.
